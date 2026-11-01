@@ -25,7 +25,9 @@
 A Rust service foundation built on [miju](https://github.com/nanfeng-labs/miju).
 Assemble application services, observe their readiness and health, and stop them
 with an explicit account of background work and resource cleanup. Your application
-owns the Tokio runtime, business configuration, resources, and logging destinations.
+owns the Tokio runtime for ordinary Rust integration; the optional JNI host owns a
+runtime per generation. Business configuration, resources, and logging destinations
+remain application responsibilities.
 
 ## Features
 
@@ -35,6 +37,7 @@ owns the Tokio runtime, business configuration, resources, and logging destinati
 - **Explicit shutdown** — distinguish a stop request, a budget result, and actual completion.
 - **Asynchronous cleanup** — retain cleanup ownership and report failures in reverse registration order.
 - **miju integration** — attach existing Workers and Monitors; keep execution and retries in miju.
+- **Optional JVM host** — export five static native methods with one `jni::export!`, reusing the same Application lifecycle.
 - **Direct periodic work** — run one async operation on a fixed delay or a grid that skips busy ticks.
 
 ## Installation
@@ -214,6 +217,45 @@ library's automatic completion proof.
 
 ## Integrations
 
+### JNI / JVM host
+
+Enable the default-off `jni` feature in a `crate-type = ["cdylib"]` consumer,
+implement `miju_services::jni::App`, and invoke
+`miju_services::jni::export!(class = "com/example/MijuBridge", app = MyApp)` once.
+The factory receives owned `Vec<String>` arguments and returns an unstarted
+`Application`; the application interprets its arguments. See the complete
+[Rust/Java UDP example and runner](examples/jni/README.md).
+
+The dedicated Java bridge must load the library directly in its own static
+initializer and directly declare exactly these five static native methods:
+
+```java
+static { System.loadLibrary("miju_jni_udp"); }
+public static native int nativeStart(String[] args);
+public static native int nativeStop(long timeoutMillis);
+public static native int nativeStatus();
+public static native String nativeLastError();
+public static native String nativeVersion();
+```
+
+`nativeStart` waits for the first healthy Required availability, with a default
+30-second budget; `ready()` alone does not satisfy health. A finite application
+may instead finish successfully, after actual exit and runtime release. The core
+builder continues to reject an empty application.
+`nativeStop` limits this caller's observation: after `-124`, the owner keeps draining
+and cleaning up, and a new start returns Busy `3`. Reuse begins only after core
+references and the runtime are released; unconfirmed host faults remain quarantined.
+Java waiters retain value metadata, not core reports or business errors. Error
+summaries are bounded and never automatically format arbitrary business errors.
+
+Call start/stop on background threads; Kotlin may call the Java wrapper from
+`withContext(Dispatchers.IO)`. Explicitly stop and check completion before JVM exit.
+This feature requires `panic=unwind`; raw JNI unsafe is confined to the private FFI
+module, while other core modules and the host state machine forbid unsafe code.
+The bridge Class pin lasts for the process lifetime. Hot unloading, helper-class
+loading, and multiple JVMs are unsupported. Windows JNI and Android ART remain
+unvalidated. See the example for return codes and migration differences.
+
 ### Existing miju execution
 
 Use `miju::worker(context, worker.stream())` with the exact context supplied to
@@ -299,6 +341,7 @@ stopping one application does not stop the other.
 | `--no-default-features` | Ordinary service, work, observation, and cleanup modules |
 | `periodic` (default) | Serial fixed-delay or fixed-grid work, without business retries |
 | `miju` (default) | Worker and Monitor lifecycle bridges using miju-core without its default features |
+| `jni` | Default-off five-method JVM host, per-generation runtime and reuse after actual completion |
 | `docsrs` | Feature documentation generation |
 | `tracing` | Structured snapshot and lifecycle failure events; no subscriber is installed |
 
@@ -314,10 +357,16 @@ cargo clippy --locked --all-features --all-targets -- -D warnings
 cargo doc --locked --all-features --no-deps
 ```
 
-Use these commands to validate the capabilities currently included in this batch.
-[CI](.github/workflows/ci.yaml) defines the checks; configuration is not evidence of
-hosted execution. See the [GitHub tooling guide](.github/README.md) for repository
-configuration and release requirements.
+Local validation covers macOS and Linux, MSRV checks, and repeated lifecycle and
+protocol execution. The earlier implementation baseline also completed a fixed
+120-second warmup plus 1800-second load run; that run predates the latest dependency
+update and does not certify the updated dependency set. An earlier Windows 10 x64 core baseline passed functional checks; its resource-trend
+v2 remains on hold. Windows JNI is unvalidated, and target business deployments
+require their own acceptance.
+
+[CI](.github/workflows/ci.yaml) defines Linux, macOS, and Windows jobs;
+workflow configuration is not evidence of hosted execution. See the
+[GitHub tooling guide](.github/README.md) for repository setup and release requirements.
 
 ## Brand assets
 

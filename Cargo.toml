@@ -18,8 +18,11 @@ miju = ["dep:miju-core"]
 tracing = ["dep:tracing", "miju-core?/tracing"]
 ## Generate feature documentation.
 docsrs = ["dep:document-features"]
+## Load an Application from a JVM through five static native methods.
+jni = ["dep:jni", "tokio/rt-multi-thread", "tokio/net"]
 
 [dependencies]
+jni = { version = "0.22.4", default-features = false, optional = true }
 miju-core = { version = "0.2.0", default-features = false, optional = true }
 tokio = { version = "1.53.3", features = ["rt", "sync", "time", "macros"] }
 tokio-util = { version = "0.7.20", features = ["rt"] }
@@ -40,7 +43,7 @@ tower = { version = "0.5", features = ["util", "limit"] }
 tokio = { version = "1.53.3", features = ["rt-multi-thread", "test-util", "net", "io-util"] }
 
 [lints.rust]
-unsafe_code = "forbid"
+unsafe_code = "deny"
 missing_docs = "warn"
 missing_debug_implementations = "warn"
 unreachable_pub = "warn"

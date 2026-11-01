@@ -1,10 +1,14 @@
-#![forbid(unsafe_code)]
+#![cfg_attr(not(feature = "jni"), forbid(unsafe_code))]
 #![doc = include_str!("../README.md")]
 #![cfg_attr(docsrs, feature(doc_cfg))]
 #![cfg_attr(feature = "docsrs", doc = document_features::document_features!())]
 
 pub mod app;
 pub mod cleanup;
+
+#[cfg(feature = "jni")]
+#[cfg_attr(docsrs, doc(cfg(feature = "jni")))]
+pub mod jni;
 
 #[cfg(feature = "miju")]
 pub mod miju;
