@@ -82,6 +82,9 @@ pub struct ServiceSnapshot {
     pub execution_errors: u64,
     /// Bounded recent execution errors with their source chains.
     pub recent_execution_errors: Vec<SharedError>,
+    /// Periodic execution counters when this service uses the periodic adapter.
+    #[cfg(feature = "periodic")]
+    pub periodic: Option<crate::periodic::PeriodicSnapshot>,
 }
 
 /// An owned point-in-time view; updates may be coalesced.

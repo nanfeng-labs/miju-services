@@ -9,7 +9,9 @@ description = "Application service lifecycles, managed work, and resource cleanu
 include = ["src/**", "examples/**", "tests/**", "Cargo.toml", "Cargo.lock", "README.md", "README.zh-CN.md", "assets/**", "LICENSE", "CHANGELOG.md"]
 
 [features]
-default = ["miju"]
+default = ["miju", "periodic"]
+## Run serial periodic operations with explicit timing semantics.
+periodic = []
 ## Integrate existing miju workers and monitors.
 miju = ["dep:miju-core"]
 ## Emit structured lifecycle events without installing a subscriber.
@@ -50,3 +52,7 @@ required-features = ["miju"]
 [[example]]
 name = "miju_monitor"
 required-features = ["miju"]
+
+[[example]]
+name = "periodic"
+required-features = ["periodic"]

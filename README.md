@@ -35,6 +35,7 @@ owns the Tokio runtime, business configuration, resources, and logging destinati
 - **Explicit shutdown** — distinguish a stop request, a budget result, and actual completion.
 - **Asynchronous cleanup** — retain cleanup ownership and report failures in reverse registration order.
 - **miju integration** — attach existing Workers and Monitors; keep execution and retries in miju.
+- **Direct periodic work** — run one async operation on a fixed delay or a grid that skips busy ticks.
 
 ## Installation
 
@@ -47,7 +48,7 @@ miju-services = { path = "../miju-services", default-features = false }
 tokio = { version = "1.53.3", features = ["rt", "time", "sync", "macros"] }
 ```
 
-Omit `default-features = false` to enable the `miju` integration.
+Omit `default-features = false` to enable the `miju` and `periodic` integrations.
 See [Cargo features](#cargo-features) for the complete list.
 
 ## Usage
@@ -133,6 +134,7 @@ Core examples also support `--no-default-features`.
 | [startup_failure](examples/startup_failure.rs) | Initialization failure and cleanup | None |
 | [miju_worker](examples/miju_worker.rs) | A Worker owned by a service | `miju` |
 | [miju_monitor](examples/miju_monitor.rs) | A Monitor with its existing restart policy | `miju` |
+| [periodic](examples/periodic.rs) | Serial asynchronous rounds | `periodic` |
 | [embedded_runtime](examples/embedded_runtime.rs) | Independent applications sharing a host runtime | None |
 
 ## How miju-services works
@@ -224,11 +226,28 @@ Any restart history retains unconfirmed backend cleanup even if the replacement
 finishes successfully: Monitor success cannot certify an earlier failed backend.
 The `miju_worker` and `miju_monitor` examples exercise both entry points.
 
+### Direct periodic work
+
+Provide a rule and one asynchronous round to `periodic::periodic(rule, operation)`.
+It becomes an ordinary service without a target registry or queue. `FixedDelay`
+waits after actual business completion; `FixedRateSkip` keeps the origin grid and
+skips busy opportunities. With a five-second period and a first round lasting eight
+seconds, the next round starts at second 13 or second 10 respectively. A late wake
+runs once at the latest due grid point and does not replay all missed ticks.
+
+The first round defaults to immediate execution. Returned business errors default
+to `Continue` and remain observable; `StopService` escalates them. Panics, arithmetic
+faults, and execution failures stop the periodic root. An active round receives a
+read-only stop context and may finish asynchronous cleanup before returning. See
+`examples/periodic.rs`; `ServiceSnapshot::periodic` retains counters and last-round
+timing, while the scope retains bounded work errors.
+
 ## Cargo features
 
 | Feature | Capability |
 | --- | --- |
 | `--no-default-features` | Ordinary service, work, observation, and cleanup modules |
+| `periodic` (default) | Serial fixed-delay or fixed-grid work, without business retries |
 | `miju` (default) | Worker and Monitor lifecycle bridges using miju-core without its default features |
 | `docsrs` | Feature documentation generation |
 | `tracing` | Structured snapshot and lifecycle failure events; no subscriber is installed |
