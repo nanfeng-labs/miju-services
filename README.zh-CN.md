@@ -323,7 +323,7 @@ cargo doc --locked --all-features --no-deps
 Windows JNI 尚未验证，目标业务部署需要另行验收。
 
 [CI](.github/workflows/ci.yaml) 定义了 Linux、macOS 和 Windows 任务；
-工作流配置不等于托管执行证据。仓库设置和发布要求见 [GitHub 工具链说明](.github/README.md)。
+工作流配置不等于托管执行证据。仓库设置和发布要求见 [GitHub 工具链说明](.github/AUTOMATION.md)。
 
 ## 品牌素材
 
