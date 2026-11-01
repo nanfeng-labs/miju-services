@@ -448,6 +448,8 @@ impl WorkScope {
         if state.active.len() >= self.inner.max {
             return Err(SpawnError::AtCapacity);
         }
+        // `try_update` is still unstable on the Rust 1.89 MSRV.
+        #[allow(deprecated)]
         let id = WorkId(
             self.inner
                 .ids
