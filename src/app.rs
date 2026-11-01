@@ -277,6 +277,8 @@ impl Application {
                         backend_unconfirmed: false,
                         execution_errors: 0,
                         recent_errors: std::collections::VecDeque::new(),
+                        #[cfg(feature = "miju")]
+                        recent_limit: self.options.recent_results,
                     })),
                     stop: CancellationToken::new(),
                     scope: WorkScope::new(

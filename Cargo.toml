@@ -9,13 +9,16 @@ description = "Application service lifecycles, managed work, and resource cleanu
 include = ["src/**", "examples/**", "tests/**", "Cargo.toml", "Cargo.lock", "README.md", "README.zh-CN.md", "assets/**", "LICENSE", "CHANGELOG.md"]
 
 [features]
-default = []
+default = ["miju"]
+## Integrate existing miju workers and monitors.
+miju = ["dep:miju-core"]
 ## Emit structured lifecycle events without installing a subscriber.
-tracing = ["dep:tracing"]
+tracing = ["dep:tracing", "miju-core?/tracing"]
 ## Generate feature documentation.
 docsrs = ["dep:document-features"]
 
 [dependencies]
+miju-core = { version = "0.2.0", default-features = false, optional = true }
 tokio = { version = "1.53.3", features = ["rt", "sync", "time", "macros"] }
 tokio-util = { version = "0.7.20", features = ["rt"] }
 futures-util = "0.3.34"
@@ -24,6 +27,8 @@ tracing = { version = "0.1", optional = true }
 document-features = { version = "0.2", optional = true }
 
 [dev-dependencies]
+miju = { version = "0.2.0", default-features = false, features = ["retry"] }
+tower = { version = "0.5", features = ["util", "limit"] }
 tokio = { version = "1.53.3", features = ["rt-multi-thread", "test-util", "net", "io-util"] }
 
 [lints.rust]
@@ -38,3 +43,11 @@ await_holding_lock = "warn"
 [package.metadata.docs.rs]
 all-features = true
 rustdoc-args = ["--cfg", "docsrs"]
+
+[[example]]
+name = "miju_worker"
+required-features = ["miju"]
+
+[[example]]
+name = "miju_monitor"
+required-features = ["miju"]

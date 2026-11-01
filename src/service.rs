@@ -148,6 +148,8 @@ pub(crate) struct ContextState {
     pub backend_unconfirmed: bool,
     pub execution_errors: u64,
     pub recent_errors: std::collections::VecDeque<crate::SharedError>,
+    #[cfg(feature = "miju")]
+    pub recent_limit: usize,
 }
 
 impl fmt::Debug for ContextState {
@@ -247,6 +249,32 @@ impl ServiceContext {
         drop(state);
         self.notify.notify_one();
         Ok(id)
+    }
+
+    #[cfg(feature = "miju")]
+    pub(crate) fn backend_unconfirmed(&self, value: bool) {
+        lock(&self.state).backend_unconfirmed = value;
+        self.notify.notify_one();
+    }
+
+    #[cfg(feature = "miju")]
+    pub(crate) fn record_execution_error(&self, error: crate::SharedError) {
+        let removed = {
+            let mut state = lock(&self.state);
+            state.execution_errors = state.execution_errors.saturating_add(1);
+            if state.recent_limit == 0 {
+                Some(error)
+            } else {
+                state.recent_errors.push_back(error);
+                if state.recent_errors.len() > state.recent_limit {
+                    state.recent_errors.pop_front()
+                } else {
+                    None
+                }
+            }
+        };
+        drop(removed);
+        self.notify.notify_one();
     }
 
     pub(crate) fn begin_stop(&self) {

@@ -34,6 +34,7 @@ owns the Tokio runtime, business configuration, resources, and logging destinati
 - **Owned work** — bound and track asynchronous, blocking, and externally aggregated responsibilities.
 - **Explicit shutdown** — distinguish a stop request, a budget result, and actual completion.
 - **Asynchronous cleanup** — retain cleanup ownership and report failures in reverse registration order.
+- **miju integration** — attach existing Workers and Monitors; keep execution and retries in miju.
 
 ## Installation
 
@@ -46,7 +47,7 @@ miju-services = { path = "../miju-services", default-features = false }
 tokio = { version = "1.53.3", features = ["rt", "time", "sync", "macros"] }
 ```
 
-The default feature set is empty for this core lifecycle batch.
+Omit `default-features = false` to enable the `miju` integration.
 See [Cargo features](#cargo-features) for the complete list.
 
 ## Usage
@@ -130,6 +131,8 @@ Core examples also support `--no-default-features`.
 | --- | --- | --- |
 | [basic](examples/basic.rs) | Dependencies, managed work, flush/close cleanup | None |
 | [startup_failure](examples/startup_failure.rs) | Initialization failure and cleanup | None |
+| [miju_worker](examples/miju_worker.rs) | A Worker owned by a service | `miju` |
+| [miju_monitor](examples/miju_monitor.rs) | A Monitor with its existing restart policy | `miju` |
 | [embedded_runtime](examples/embedded_runtime.rs) | Independent applications sharing a host runtime | None |
 
 ## How miju-services works
@@ -202,11 +205,31 @@ continues; a pending cleanup is not dropped because an observer times out.
 references, detached application tasks, and remote device effects are outside the
 library's automatic completion proof.
 
+## Integrations
+
+### Existing miju execution
+
+Use `miju::worker(context, worker.stream())` with the exact context supplied to
+`WorkerBuilder`. The bridge consumes Start before requesting stop, then keeps
+polling the same stream to EOF. A finite source should use `Lifetime::Finite`.
+Start declares the driver established; initialize remote dependencies before that
+point when business readiness requires it. Execution errors are retained in
+`ServiceSnapshot::execution_errors` and its bounded recent errors. A backend driver
+error or forced cancellation leaves backend cleanup unconfirmed.
+
+`miju::monitor(monitor)` attaches one whole Monitor and preserves its restart
+policy. Internal worker errors may be delayed until resident siblings stop; attach
+workers separately when application-level failure must propagate immediately.
+Any restart history retains unconfirmed backend cleanup even if the replacement
+finishes successfully: Monitor success cannot certify an earlier failed backend.
+The `miju_worker` and `miju_monitor` examples exercise both entry points.
+
 ## Cargo features
 
 | Feature | Capability |
 | --- | --- |
 | `--no-default-features` | Ordinary service, work, observation, and cleanup modules |
+| `miju` (default) | Worker and Monitor lifecycle bridges using miju-core without its default features |
 | `docsrs` | Feature documentation generation |
 | `tracing` | Structured snapshot and lifecycle failure events; no subscriber is installed |
 
