@@ -131,6 +131,8 @@ async fn main() -> Result<(), BoxError> {
 | [miju_worker](examples/miju_worker.rs) | 由服务持有的 Worker | `miju` |
 | [miju_monitor](examples/miju_monitor.rs) | 保留现有重启策略的 Monitor | `miju` |
 | [periodic](examples/periodic.rs) | 串行异步周期工作 | `periodic` |
+| [cron_worker](examples/cron_worker.rs) | miju-cron 直接作为 Worker 来源 | `miju` |
+| [bounded_queue_rounds](examples/bounded_queue_rounds.rs) | 接纳上限与覆盖重试的最终回执 | `miju` |
 | [embedded_runtime](examples/embedded_runtime.rs) | 多个独立应用共享宿主运行时 | 无 |
 
 ## 工作原理
@@ -221,6 +223,21 @@ Monitor 的成功不能证明先前失败的 backend 已清理。
 进行中的一轮会收到只读停止上下文，可以在返回前完成异步清理。
 参见 [periodic 示例](examples/periodic.rs)。`ServiceSnapshot::periodic` 保留计数器与最近一轮的时间信息，
 工作域则保留有界的工作错误记录。
+
+### 日历任务与排队轮次
+
+运行 `cargo run --locked --example cron_worker`，展示日历来源直接向 miju Worker 提供任务。
+该示例使用 miju-cron 和 UTC cron 计划。来源预取和下游背压可能让已到期的触发稍后才交付；
+这不是 `FixedRateSkip`，也不承诺按完成时间计时。示例和测试未验证本地时区夏令时切换。
+
+运行 `cargo run --locked --example bounded_queue_rounds`，展示两个轮次：
+收到最终回执后再等待 5 秒，才提交下一轮。示例私有适配器以一个许可覆盖排队、执行和重试期间的责任，
+跳过已有一轮受管工作的目标，并持有许可直到作业释放。
+生产者依赖 worker，在允许 worker 停止前等待已接纳轮次的回执。丢弃回执观察者不会取消作业。
+
+`ReceiptLayer` 包裹完整的用户重试链：成功或失败表示该链的最终结果，丢弃未完成作业则报告取消。
+示例使用 MemoryStorage 的 Identity 确认机制；回执不承诺其他 backend 的持久化确认。
+持有作业的 backend 被丢弃时，仍在队列中的作业会取消，不会持久化或重放。
 
 ## Cargo features
 
