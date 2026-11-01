@@ -135,6 +135,8 @@ Core examples also support `--no-default-features`.
 | [miju_worker](examples/miju_worker.rs) | A Worker owned by a service | `miju` |
 | [miju_monitor](examples/miju_monitor.rs) | A Monitor with its existing restart policy | `miju` |
 | [periodic](examples/periodic.rs) | Serial asynchronous rounds | `periodic` |
+| [cron_worker](examples/cron_worker.rs) | miju-cron directly feeding a Worker | `miju` |
+| [bounded_queue_rounds](examples/bounded_queue_rounds.rs) | Admission bounds and final receipts across retries | `miju` |
 | [embedded_runtime](examples/embedded_runtime.rs) | Independent applications sharing a host runtime | None |
 
 ## How miju-services works
@@ -241,6 +243,27 @@ faults, and execution failures stop the periodic root. An active round receives 
 read-only stop context and may finish asynchronous cleanup before returning. See
 `examples/periodic.rs`; `ServiceSnapshot::periodic` retains counters and last-round
 timing, while the scope retains bounded work errors.
+
+### Calendar and queued rounds
+
+Run `cargo run --locked --example cron_worker` for a calendar source directly
+feeding a miju Worker. This uses miju-cron with a UTC cron schedule. Source
+prefetch and downstream backpressure can deliver an already-due tick later;
+this is not `FixedRateSkip` and does not promise completion-relative timing.
+The example and tests do not certify local-time DST transitions.
+
+Run `cargo run --locked --example bounded_queue_rounds` for two rounds with
+five seconds between a final receipt and the next submission. The private
+example adapter bounds queued plus executing/retrying jobs with one permit,
+skips an already-owned target, and holds its permit until the job is released.
+The producer depends on the worker and waits for the accepted round's receipt
+before allowing worker shutdown. A dropped receipt observer does not cancel the job.
+
+`ReceiptLayer` wraps the complete user retry chain: success/failure is final
+for that chain, while dropping an unfinished job reports cancellation. This
+example uses MemoryStorage's Identity acknowledgement; its receipt is not a
+promise of durable acknowledgement for other backends. Jobs still queued when
+the owning backend is dropped are cancelled, not persisted or replayed.
 
 ## Cargo features
 

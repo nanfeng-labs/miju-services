@@ -29,6 +29,10 @@ tracing = { version = "0.1", optional = true }
 document-features = { version = "0.2", optional = true }
 
 [dev-dependencies]
+miju = { version = "0.2.0", default-features = false, features = ["retry"] }
+miju-cron = { version = "0.2.0", default-features = false, features = ["cron"] }
+cron = "0.17"
+futures-channel = { version = "0.3.34", features = ["sink"] }
 tower = { version = "0.5", features = ["util", "limit"] }
 tokio = { version = "1.53.3", features = ["rt-multi-thread", "test-util", "net", "io-util"] }
 
@@ -56,3 +60,11 @@ required-features = ["miju"]
 [[example]]
 name = "periodic"
 required-features = ["periodic"]
+
+[[example]]
+name = "cron_worker"
+required-features = ["miju"]
+
+[[example]]
+name = "bounded_queue_rounds"
+required-features = ["miju"]
