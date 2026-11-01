@@ -10,6 +10,8 @@ pub mod cleanup;
 pub mod miju;
 pub mod observe;
 
+#[cfg(feature = "periodic")]
+pub mod periodic;
 pub mod report;
 pub mod service;
 mod util;

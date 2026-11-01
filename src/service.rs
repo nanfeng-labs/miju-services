@@ -146,6 +146,8 @@ pub(crate) struct ContextState {
     pub finished: bool,
     pub stopping: bool,
     pub backend_unconfirmed: bool,
+    #[cfg(feature = "periodic")]
+    pub periodic: Option<crate::periodic::PeriodicSnapshot>,
     pub execution_errors: u64,
     pub recent_errors: std::collections::VecDeque<crate::SharedError>,
     #[cfg(feature = "miju")]
@@ -249,6 +251,12 @@ impl ServiceContext {
         drop(state);
         self.notify.notify_one();
         Ok(id)
+    }
+
+    #[cfg(feature = "periodic")]
+    pub(crate) fn update_periodic(&self, snapshot: crate::periodic::PeriodicSnapshot) {
+        lock(&self.state).periodic = Some(snapshot);
+        self.notify.notify_one();
     }
 
     #[cfg(feature = "miju")]

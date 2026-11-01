@@ -34,6 +34,7 @@
 - **明确停止语义**：区分停止请求、停止预算结果与实际完成。
 - **异步清理**：持续持有清理责任，按注册的逆序执行并报告失败。
 - **miju 接入**：接入现有 Worker 和 Monitor，执行与重试仍交给 miju。
+- **直接周期工作**：运行一轮异步操作，支持完成后延时或按固定时间网格触发、忙则跳过。
 
 ## 安装
 
@@ -46,7 +47,7 @@ miju-services = { path = "../miju-services", default-features = false }
 tokio = { version = "1.53.3", features = ["rt", "time", "sync", "macros"] }
 ```
 
-去掉 `default-features = false` 即可启用默认的 `miju` 接入能力。
+去掉 `default-features = false` 即可启用默认的 `miju` 和 `periodic` 接入能力。
 完整列表见 [Cargo features](#cargo-features)。
 
 ## 用法
@@ -129,6 +130,7 @@ async fn main() -> Result<(), BoxError> {
 | [startup_failure](examples/startup_failure.rs) | 初始化失败与清理 | 无 |
 | [miju_worker](examples/miju_worker.rs) | 由服务持有的 Worker | `miju` |
 | [miju_monitor](examples/miju_monitor.rs) | 保留现有重启策略的 Monitor | `miju` |
+| [periodic](examples/periodic.rs) | 串行异步周期工作 | `periodic` |
 | [embedded_runtime](examples/embedded_runtime.rs) | 多个独立应用共享宿主运行时 | 无 |
 
 ## 工作原理
@@ -206,11 +208,26 @@ backend 驱动错误或强制取消会使 backend 清理处于未确认状态。
 Monitor 的成功不能证明先前失败的 backend 已清理。
 `miju_worker` 和 `miju_monitor` 示例分别展示这两个入口。
 
+### 直接周期工作
+
+向 `periodic::periodic(rule, operation)` 提供周期规则和一轮异步操作，即可得到普通服务，
+无需目标注册表或队列。`FixedDelay` 从业务实际完成后开始等待；
+`FixedRateSkip` 保持起始时间网格，跳过忙碌期间的触发机会。
+周期为 5 秒、首轮在第 0 秒开始且持续 8 秒时，两种规则的下一轮分别在第 13 秒和第 10 秒开始。
+延迟唤醒时只针对最近到期的网格点运行一次，不补跑所有错过的周期。
+
+首轮默认立即执行。业务返回错误时默认 `Continue`，保留可观察结果并继续；
+`StopService` 则将其升级为服务失败。panic、算术故障及执行失败会停止周期根执行体。
+进行中的一轮会收到只读停止上下文，可以在返回前完成异步清理。
+参见 [periodic 示例](examples/periodic.rs)。`ServiceSnapshot::periodic` 保留计数器与最近一轮的时间信息，
+工作域则保留有界的工作错误记录。
+
 ## Cargo features
 
 | Feature | 能力 |
 | --- | --- |
 | `--no-default-features` | 普通服务、工作、观察与清理模块 |
+| `periodic`（默认） | 串行的固定延时或固定网格工作，不提供业务重试 |
 | `miju`（默认） | Worker 和 Monitor 生命周期桥接，使用关闭默认功能的 miju-core |
 | `docsrs` | 生成功能开关文档 |
 | `tracing` | 结构化快照与生命周期失败事件，不安装 subscriber |

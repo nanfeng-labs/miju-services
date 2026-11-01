@@ -275,6 +275,8 @@ impl Application {
                         finished: false,
                         stopping: false,
                         backend_unconfirmed: false,
+                        #[cfg(feature = "periodic")]
+                        periodic: None,
                         execution_errors: 0,
                         recent_errors: std::collections::VecDeque::new(),
                         #[cfg(feature = "miju")]
@@ -451,6 +453,8 @@ impl Driver {
                 let state = lock(&root.context.state);
                 let health = state.health;
                 let backend = state.backend_unconfirmed;
+                #[cfg(feature = "periodic")]
+                let periodic = state.periodic.clone();
                 let execution_errors = state.execution_errors;
                 let recent_execution_errors = state.recent_errors.iter().cloned().collect();
                 drop(state);
@@ -466,6 +470,8 @@ impl Driver {
                     work: root.context.scope.snapshot(),
                     stop_budget_exceeded: root.local_exceeded,
                     backend_cleanup_unconfirmed: backend,
+                    #[cfg(feature = "periodic")]
+                    periodic,
                     execution_errors,
                     recent_execution_errors,
                 }
