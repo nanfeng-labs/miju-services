@@ -366,7 +366,7 @@ require their own acceptance.
 
 [CI](.github/workflows/ci.yaml) defines Linux, macOS, and Windows jobs;
 workflow configuration is not evidence of hosted execution. See the
-[GitHub tooling guide](.github/README.md) for repository setup and release requirements.
+[GitHub tooling guide](.github/AUTOMATION.md) for repository setup and release requirements.
 
 ## Brand assets
 
