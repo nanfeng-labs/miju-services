@@ -2,6 +2,7 @@
 
 ## [Unreleased]
 
+- feat(jni): add JVM lifecycle host and UDP example ([#6](https://github.com/nanfeng-labs/miju-services/pull/6))
 - feat(examples): add HTTP WebSocket and UDP services ([#5](https://github.com/nanfeng-labs/miju-services/pull/5))
 - feat(examples): add calendar and bounded queue workflows ([#4](https://github.com/nanfeng-labs/miju-services/pull/4))
 - feat(periodic): add serial periodic services ([#3](https://github.com/nanfeng-labs/miju-services/pull/3))
@@ -13,3 +14,5 @@
 - Add serial direct periodic work with fixed-delay and fixed-grid timing.
 - Add calendar sources and bounded queued rounds with final receipts.
 - Add HTTP, WebSocket and UDP lifecycle examples and protocol regression coverage.
+- Add an optional five-method JVM host with per-generation runtime ownership,
+  explicit shutdown observation and a real Java UDP example.

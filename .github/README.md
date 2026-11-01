@@ -17,6 +17,9 @@ repository settings or prove that GitHub-hosted jobs have run.
   use nightly as in miju. Windows remains
   configured for subsequent hosted validation. The separate original Windows
   x64 run passed functional checks; resource-trend v2 remains on hold.
+- The `jvm` CI job defines Linux/macOS, JDK 17/21 and stable/MSRV real UDP
+  consumer runs with `-Xcheck:jni`. Windows JNI and Android ART are unvalidated.
+  These workflow definitions do not claim any hosted run has occurred.
 - `pr-checks.yaml` prepares same-repository PRs, then validates the live title and
   changelog. Titles contain the PR's own `#N`. Dependabot titles and changelog
   entries are exempt; maintainers can use `skip-changelog` to waive the entry check.
@@ -55,7 +58,9 @@ unmaintained/yanked reporting without inheriting miju's unrelated exceptions.
 
 The vet store imports public audits from Bytecode Alliance, Google, Mozilla and
 Zcash. Version-specific exemptions are explicitly **unaudited bootstrap baselines**,
-not local security certifications. Dependency updates must resolve new vet findings
+not local security certifications. The optional JNI normal dependencies also have
+explicit version-specific unaudited baseline exemptions; no audit is inferred from
+JVM tests. Dependency updates must resolve new vet findings
 and document any exemption; never turn a failing check into an invented audit.
 
 ## Releases

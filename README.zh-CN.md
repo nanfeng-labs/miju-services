@@ -24,7 +24,8 @@
 
 建立在 [miju](https://github.com/nanfeng-labs/miju) 之上的 Rust 服务基座。
 装配应用服务，观察就绪与健康状态，并在停止时明确报告后台工作和资源清理的完成情况。
-应用负责 Tokio 运行时、业务配置、资源以及日志输出位置。
+普通 Rust 接入由应用持有 Tokio 运行时；可选 JNI 宿主为每代应用持有自己的运行时。
+业务配置、资源以及日志输出位置始终由应用负责。
 
 ## 功能
 
@@ -34,6 +35,7 @@
 - **明确停止语义**：区分停止请求、停止预算结果与实际完成。
 - **异步清理**：持续持有清理责任，按注册的逆序执行并报告失败。
 - **miju 接入**：接入现有 Worker 和 Monitor，执行与重试仍交给 miju。
+- **可选 JVM 宿主**：一次 `jni::export!` 导出五个 static native 方法，复用相同的 Application 生命周期。
 - **直接周期工作**：运行一轮异步操作，支持完成后延时或按固定时间网格触发、忙则跳过。
 
 ## 安装
@@ -199,6 +201,36 @@ flowchart LR
 
 ## 集成
 
+### JNI / JVM 宿主
+
+启用默认关闭的 `jni` feature，消费 crate 使用 `crate-type = ["cdylib"]`，实现
+`miju_services::jni::App` 并调用一次
+`miju_services::jni::export!(class = "com/example/MijuBridge", app = MyApp)`。
+工厂接收 owned `Vec<String>`，返回尚未启动的 `Application`；参数解释由应用决定。
+完整 Rust、Java、运行脚本及真实 UDP 示例见 [examples/jni](examples/jni/README.md)。
+
+Java 桥接类必须直接在自身 static initializer 中加载库，并直接声明且只声明这五个 static native 方法：
+
+```java
+static { System.loadLibrary("miju_jni_udp"); }
+public static native int nativeStart(String[] args);
+public static native int nativeStop(long timeoutMillis);
+public static native int nativeStatus();
+public static native String nativeLastError();
+public static native String nativeVersion();
+```
+
+`nativeStart` 等待 Required 首次健康可用，默认预算 30 秒；仅 `ready()` 不足以通过健康门槛。
+有限应用自然完成时，必须实际退出并释放运行时后才返回成功；空应用仍被 core builder 拒绝。
+`nativeStop` 的时限只结束本次观察：返回 `-124` 后，原 owner 继续排空和清理，新启动返回 Busy `3`。
+只有 core 引用释放、运行时析构完成后才允许新代；无法确认的宿主故障保持隔离。
+Java 等待者只持纯值状态，不持 core 报告或业务错误。摘要有界且不自动格式化任意业务错误。
+
+调用 start/stop 应使用后台线程；Kotlin 可用 `withContext(Dispatchers.IO)` 调用 Java 静态包装。
+JVM 退出前须显式 stop 并核对实际完成。本版要求 `panic=unwind`，唯一原始 JNI unsafe 边界在私有 ffi 模块；
+其他 core 模块及宿主状态机保持 forbid unsafe。桥接类 pin 保留至进程结束，不支持热卸载、辅助类代加载或多 JVM。
+Windows JNI 与 Android ART 尚未验证。返回码和迁移差异见示例说明。
+
 ### 现有 miju 执行体
 
 使用 `miju::worker(context, worker.stream())`，其中 context 必须与传给 `WorkerBuilder` 的相同。
@@ -269,6 +301,7 @@ UDP 丢弃并计数因容量不足而被拒绝的数据报，停止时等待已�
 | `--no-default-features` | 普通服务、工作、观察与清理模块 |
 | `periodic`（默认） | 串行的固定延时或固定网格工作，不提供业务重试 |
 | `miju`（默认） | Worker 和 Monitor 生命周期桥接，使用关闭默认功能的 miju-core |
+| `jni` | 默认关闭；五方法 JVM 宿主、每代运行时与实际完成后复用 |
 | `docsrs` | 生成功能开关文档 |
 | `tracing` | 结构化快照与生命周期失败事件，不安装 subscriber |
 
@@ -283,9 +316,14 @@ cargo clippy --locked --all-features --all-targets -- -D warnings
 cargo doc --locked --all-features --no-deps
 ```
 
-本批通过上面的命令验证当前已提供的功能。
-[CI](.github/workflows/ci.yaml) 定义工程检查；工作流配置不等于托管执行证据。
-仓库配置和发布要求见 [GitHub 工具链说明](.github/README.md)。
+本地验证覆盖 macOS、Linux、MSRV 检查，以及生命周期和协议的重复执行。
+较早的实现基线还完成了固定 120 秒预热加 1800 秒负载运行；
+该次运行早于最新依赖更新，不能证明更新后依赖组合的长负载结果。
+较早的 Windows 10 x64 core 基线已通过功能验证，资源趋势 v2 补验继续搁置。
+Windows JNI 尚未验证，目标业务部署需要另行验收。
+
+[CI](.github/workflows/ci.yaml) 定义了 Linux、macOS 和 Windows 任务；
+工作流配置不等于托管执行证据。仓库设置和发布要求见 [GitHub 工具链说明](.github/README.md)。
 
 ## 品牌素材
 
