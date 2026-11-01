@@ -43,15 +43,16 @@ remain application responsibilities.
 ## Installation
 
 Requires **Rust 1.89+** and a caller-owned Tokio runtime with time enabled.
-For a local checkout:
+This is a prerelease; specify `0.1.0-beta` explicitly:
 
 ```toml
 [dependencies]
-miju-services = { path = "../miju-services", default-features = false }
+miju-services = { version = "0.1.0-beta", default-features = false }
 tokio = { version = "1.53.3", features = ["rt", "time", "sync", "macros"] }
 ```
 
 Omit `default-features = false` to enable the `miju` and `periodic` integrations.
+For a local checkout, use `path = "../miju-services"` in place of `version`.
 See [Cargo features](#cargo-features) for the complete list.
 
 ## Usage

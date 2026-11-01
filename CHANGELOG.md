@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+## [0.1.0-beta]
+
+- bump: to v0.1.0-beta ([#8](https://github.com/nanfeng-labs/miju-services/pull/8))
+
 - fix(docs): display the product README on the repository homepage ([#7](https://github.com/nanfeng-labs/miju-services/pull/7))
 
 - feat(jni): add JVM lifecycle host and UDP example ([#6](https://github.com/nanfeng-labs/miju-services/pull/6))
