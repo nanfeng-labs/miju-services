@@ -6,6 +6,8 @@
 pub mod app;
 pub mod cleanup;
 
+#[cfg(feature = "miju")]
+pub mod miju;
 pub mod observe;
 
 pub mod report;

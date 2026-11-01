@@ -33,6 +33,7 @@
 - **受管工作**：限制并跟踪异步、阻塞及外部聚合工作的责任数量。
 - **明确停止语义**：区分停止请求、停止预算结果与实际完成。
 - **异步清理**：持续持有清理责任，按注册的逆序执行并报告失败。
+- **miju 接入**：接入现有 Worker 和 Monitor，执行与重试仍交给 miju。
 
 ## 安装
 
@@ -45,7 +46,7 @@ miju-services = { path = "../miju-services", default-features = false }
 tokio = { version = "1.53.3", features = ["rt", "time", "sync", "macros"] }
 ```
 
-本批核心生命周期的默认 feature 集合为空。
+去掉 `default-features = false` 即可启用默认的 `miju` 接入能力。
 完整列表见 [Cargo features](#cargo-features)。
 
 ## 用法
@@ -126,6 +127,8 @@ async fn main() -> Result<(), BoxError> {
 | --- | --- | --- |
 | [basic](examples/basic.rs) | 依赖、受管工作、flush/close 清理 | 无 |
 | [startup_failure](examples/startup_failure.rs) | 初始化失败与清理 | 无 |
+| [miju_worker](examples/miju_worker.rs) | 由服务持有的 Worker | `miju` |
+| [miju_monitor](examples/miju_monitor.rs) | 保留现有重启策略的 Monitor | `miju` |
 | [embedded_runtime](examples/embedded_runtime.rs) | 多个独立应用共享宿主运行时 | 无 |
 
 ## 工作原理
@@ -187,11 +190,28 @@ flowchart LR
 `is_drained()` 与 `is_success()` 回答不同问题。
 外部资源引用、应用自行分离的任务以及远端设备上的效果，不在本库自动确认完成的范围内。
 
+## 集成
+
+### 现有 miju 执行体
+
+使用 `miju::worker(context, worker.stream())`，其中 context 必须与传给 `WorkerBuilder` 的相同。
+桥接层先消费 Start 事件，再请求停止，随后持续轮询同一条流直到 EOF。
+有限来源应使用 `Lifetime::Finite`。Start 只表示驱动已建立；如果业务就绪依赖远端资源，
+应在此之前完成初始化。执行错误保留在 `ServiceSnapshot::execution_errors` 及有界的近期错误记录中。
+backend 驱动错误或强制取消会使 backend 清理处于未确认状态。
+
+`miju::monitor(monitor)` 接入整个 Monitor，保留其重启策略。
+内部 worker 错误可能延迟到其他常驻 worker 停止后才返回；需要立即向应用传播失败时，应分别接入 worker。
+只要存在重启历史，就会保留未确认的 backend 清理，即使替代实例成功结束也一样：
+Monitor 的成功不能证明先前失败的 backend 已清理。
+`miju_worker` 和 `miju_monitor` 示例分别展示这两个入口。
+
 ## Cargo features
 
 | Feature | 能力 |
 | --- | --- |
 | `--no-default-features` | 普通服务、工作、观察与清理模块 |
+| `miju`（默认） | Worker 和 Monitor 生命周期桥接，使用关闭默认功能的 miju-core |
 | `docsrs` | 生成功能开关文档 |
 | `tracing` | 结构化快照与生命周期失败事件，不安装 subscriber |
 
