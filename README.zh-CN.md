@@ -133,6 +133,9 @@ async fn main() -> Result<(), BoxError> {
 | [periodic](examples/periodic.rs) | 串行异步周期工作 | `periodic` |
 | [cron_worker](examples/cron_worker.rs) | miju-cron 直接作为 Worker 来源 | `miju` |
 | [bounded_queue_rounds](examples/bounded_queue_rounds.rs) | 接纳上限与覆盖重试的最终回执 | `miju` |
+| [http](examples/http.rs) | Axum HTTP/1 与资源归属完成屏障 | 无 |
+| [websocket](examples/websocket.rs) | 受管会话与有时限的关闭握手 | 无 |
+| [udp](examples/udp.rs) | 有界数据报处理 | 无 |
 | [embedded_runtime](examples/embedded_runtime.rs) | 多个独立应用共享宿主运行时 | 无 |
 
 ## 工作原理
@@ -238,6 +241,26 @@ Monitor 的成功不能证明先前失败的 backend 已清理。
 `ReceiptLayer` 包裹完整的用户重试链：成功或失败表示该链的最终结果，丢弃未完成作业则报告取消。
 示例使用 MemoryStorage 的 Identity 确认机制；回执不承诺其他 backend 的持久化确认。
 持有作业的 backend 被丢弃时，仍在队列中的作业会取消，不会持久化或重放。
+
+### 协议与运行时示例
+
+协议辅助代码属于示例私有实现，协议库只作为开发依赖引入。
+通过 `cargo run --locked --example NAME` 运行 `http`、`websocket`、`udp` 或 `embedded_runtime`。
+HTTP 示例使用 Axum 0.8.9，在 Tokio TcpListener 上提供 HTTP/1。
+聚合工作同时等待 serve 完成和析构屏障，后者覆盖 Router 状态、处理器 future 与响应 body。
+业务资源应放在这些受跟踪的所有者中；任意请求/响应扩展、依赖所有者存活的字节缓冲区、TLS 和 HTTP/2
+需要单独验证资源归属。处理器或 body 的 panic 不会自动变为服务器错误。
+`/ready` 读取应用当前的就绪快照。
+
+WebSocket 升级在返回 101 前预留受管会话；工作域关闭或已满时返回 503。
+会话持有传输的读写两端，将待发送消息限制为 32 条，并关闭慢连接。
+主动关闭时，Close 的发送、flush 和对端响应共用一个 2 秒绝对截止时间。
+对端先发 Close 时，会话 flush 协议已排队的响应，不重复发送第二个 Close。
+应用更早发起的中止仍然有效。即使协议关闭超时，也会确认传输资源释放，并在工作结果中保留失败。
+
+UDP 丢弃并计数因容量不足而被拒绝的数据报，停止时等待已接纳的处理完成。
+嵌入式运行时示例在停止结果为 Incomplete 后仍保留调用方运行时与观察者，直到确认实际排空；
+停止其中一个应用不会停止另一个应用。
 
 ## Cargo features
 

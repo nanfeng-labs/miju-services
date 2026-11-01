@@ -137,6 +137,9 @@ Core examples also support `--no-default-features`.
 | [periodic](examples/periodic.rs) | Serial asynchronous rounds | `periodic` |
 | [cron_worker](examples/cron_worker.rs) | miju-cron directly feeding a Worker | `miju` |
 | [bounded_queue_rounds](examples/bounded_queue_rounds.rs) | Admission bounds and final receipts across retries | `miju` |
+| [http](examples/http.rs) | Axum HTTP/1 with an ownership completion barrier | None |
+| [websocket](examples/websocket.rs) | Managed sessions and bounded close handshake | None |
+| [udp](examples/udp.rs) | Bounded datagram processing | None |
 | [embedded_runtime](examples/embedded_runtime.rs) | Independent applications sharing a host runtime | None |
 
 ## How miju-services works
@@ -264,6 +267,30 @@ for that chain, while dropping an unfinished job reports cancellation. This
 example uses MemoryStorage's Identity acknowledgement; its receipt is not a
 promise of durable acknowledgement for other backends. Jobs still queued when
 the owning backend is dropped are cancelled, not persisted or replayed.
+
+### Protocol and runtime examples
+
+The protocol helpers are private example code; protocol crates are dev dependencies.
+Run `http`, `websocket`, `udp`, or `embedded_runtime` with `cargo run --locked --example NAME`.
+The HTTP example uses Axum 0.8.9 with HTTP/1 on a Tokio TcpListener. Its aggregate
+waits for serve and a destructor barrier covering Router state, handler futures,
+and response bodies. Keep business resources in these tracked owners; arbitrary
+request/response extensions, owner-backed byte buffers, TLS, and HTTP/2 require
+separate ownership verification. Handler/body panics do not automatically become
+server errors. `/ready` reads the current application readiness snapshot.
+
+WebSocket upgrades reserve a managed session before returning 101; closed or full
+scopes return 503. Sessions own both transport halves, bound outbound messages to
+32, and close slow connections. A single two-second deadline covers initiated
+Close send/flush and the peer response. When the peer initiates Close, the session
+flushes the protocol's queued response instead of sending a second Close. Earlier
+application abort still applies. Transport release is confirmed even when protocol
+closure times out; the work result retains that failure.
+
+UDP drops and counts datagrams rejected at capacity and waits for admitted
+processing on shutdown. The embedded runtime example keeps its caller-owned runtime
+and observer alive after an incomplete shutdown until actual drain is observed;
+stopping one application does not stop the other.
 
 ## Cargo features
 
