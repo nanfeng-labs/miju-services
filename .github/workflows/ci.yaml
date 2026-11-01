@@ -1,0 +1,123 @@
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_call:
+  workflow_dispatch:
+
+name: cargo-lints
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  check:
+    name: cargo-check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions-rust-lang/setup-rust-toolchain@v2
+        with:
+          toolchain: stable
+      - run: cargo check --workspace --locked
+      - run: cargo check --workspace --all-features --locked
+      - name: install-cargo-hack
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-hack
+      - name: cargo-hack
+        run: cargo hack check --workspace --each-feature --locked
+
+  test:
+    name: cargo-test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions-rust-lang/setup-rust-toolchain@v2
+        with:
+          toolchain: stable
+      - run: cargo test --workspace --all-targets --locked
+      - run: cargo test --workspace --all-features --all-targets --locked
+      - run: cargo test --workspace --no-default-features --all-targets --locked
+      - run: cargo test --workspace --doc --locked
+      - run: cargo test --workspace --doc --all-features --locked
+      - run: cargo test --workspace --doc --no-default-features --locked
+      - run: cargo run --example basic --locked
+      - run: cargo run --example basic --all-features --locked
+      - run: cargo run --example basic --no-default-features --locked
+
+  fmt:
+    name: cargo-fmt
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions-rust-lang/setup-rust-toolchain@v2
+        with:
+          toolchain: stable
+          components: rustfmt
+      - run: cargo fmt --all -- --check
+
+  clippy:
+    name: cargo-clippy
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions-rust-lang/setup-rust-toolchain@v2
+        with:
+          toolchain: stable
+          components: clippy
+      - run: cargo clippy --workspace --all-features --all-targets --locked -- -D warnings
+      - run: cargo clippy --workspace --no-default-features --all-targets --locked -- -D warnings
+
+  doc:
+    name: cargo-doc
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: install-nightly
+        uses: dtolnay/rust-toolchain@nightly
+      - name: cargo-doc
+        run: cargo doc --workspace --no-deps --all-features --locked
+        env:
+          RUSTDOCFLAGS: --cfg docsrs -D warnings
+      - name: cargo-doc-minimal
+        run: cargo doc --workspace --no-deps --no-default-features --locked
+        env:
+          RUSTDOCFLAGS: --cfg docsrs -D warnings
+
+  udeps:
+    name: cargo-udeps
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - run: rustup update
+      - run: rustup install nightly
+      - run: rustup show
+      - uses: Swatinem/rust-cache@v2
+        with:
+          cache-on-failure: true
+      - run: cargo +nightly install cargo-udeps --locked
+      - run: cargo +nightly udeps --workspace --all-targets --all-features
+
+  msrv:
+    name: cargo-msrv (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions-rust-lang/setup-rust-toolchain@v2
+        with:
+          toolchain: 1.89.0
+      - run: cargo test --workspace --no-default-features --all-targets --locked
+      - run: cargo test --workspace --all-features --all-targets --locked
+      - run: cargo test --workspace --doc --all-features --locked

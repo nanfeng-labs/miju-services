@@ -1,0 +1,143 @@
+name: changelog-update
+
+on:
+  workflow_call:
+    secrets:
+      CHANGELOG_TOKEN:
+        description: Optional repository token for automatic commits that trigger checks on the new head
+        required: false
+    outputs:
+      head:
+        description: PR head after preparing the changelog
+        value: ${{ jobs.update.outputs.head }}
+
+permissions:
+  contents: write
+  pull-requests: write
+
+concurrency:
+  group: changelog-update-${{ github.event.pull_request.number }}
+  cancel-in-progress: false
+
+jobs:
+  update:
+    name: changelog-update
+    if: >-
+      github.event.pull_request.head.repo.full_name == github.repository &&
+      github.event.pull_request.head.ref != 'main' &&
+      github.event.pull_request.user.login != 'dependabot[bot]' &&
+      github.actor != 'dependabot[bot]'
+    runs-on: ubuntu-latest
+    outputs:
+      head: ${{ steps.commit.outputs.head }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ github.event.pull_request.head.ref }}
+          # Prepared PRs need no extra secret. Source updates require the token below.
+          token: ${{ secrets.CHANGELOG_TOKEN || github.token }}
+
+      - name: changelog-update
+        env:
+          GH_TOKEN: ${{ secrets.CHANGELOG_TOKEN || github.token }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          PR_BRANCH: ${{ github.event.pull_request.head.ref }}
+          CAN_COMMIT: ${{ secrets.CHANGELOG_TOKEN != '' }}
+        run: |
+          gh api "repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER" > "$RUNNER_TEMP/changelog-pr.json"
+          python3 -I - "$RUNNER_TEMP/changelog-pr.json" <<'PY'
+          import json, os, pathlib, re, subprocess, sys
+
+          with open(sys.argv[1], encoding="utf-8") as file:
+              pr = json.load(file)
+          number = str(pr["number"])
+          repository = os.environ["GITHUB_REPOSITORY"]
+          branch = os.environ["PR_BRANCH"]
+          if (pr["state"] != "open" or number != os.environ["PR_NUMBER"]
+              or branch == "main"
+              or pr["head"]["repo"]["full_name"] != repository or pr["head"]["ref"] != branch):
+              sys.exit("The PR must be open from a non-main branch in this repository")
+          head = subprocess.check_output(["git", "rev-parse", "HEAD"]).decode().strip()
+          if head != pr["head"]["sha"]:
+              sys.exit("The PR branch changed during checkout; rerun against its current head")
+
+          def check(text):
+              if "\0" in text:
+                  sys.exit("Changelog text cannot contain NUL")
+
+          title = pr["title"]
+          check(title)
+          if "\n" in title or "\r" in title:
+              sys.exit("The PR title must be a single line")
+          if "#" not in title:
+              title = f"{title.strip()} #{number}"
+          matches = list(re.finditer(r"(?<!\w)#([1-9][0-9]*)(?![0-9A-Za-z_.])", title))
+          if title.count("#") != 1 or len(matches) != 1 or matches[0].group(1) != number:
+              sys.exit("Title must contain exactly one reference matching the PR number")
+          match = matches[0]
+          description = (title[:match.start()] + title[match.end():]).strip()
+          if not description:
+              sys.exit("The PR title must include a description")
+          if title != pr["title"]:
+              subprocess.run(["gh", "api", "--method", "PATCH",
+                              f"repos/{repository}/pulls/{number}", "-f", f"title={title}"],
+                             check=True, stdout=subprocess.DEVNULL)
+          title = description
+          title = re.sub(r"([\\`*_\[\]<>])", r"\\\1", title)
+          link = f"[#{number}](https://github.com/{repository}/pull/{number})"
+          entry = f"- {title} ({link})"
+
+          path = pathlib.Path("CHANGELOG.md")
+          if path.is_symlink():
+              sys.exit("CHANGELOG.md must be a regular file")
+          original = path.read_text(encoding="utf-8")
+          check(original)
+          lines = original.splitlines()
+          headings = [i for i, line in enumerate(lines) if line.strip() == "## [Unreleased]"]
+          if len(headings) != 1:
+              sys.exit("CHANGELOG.md must contain exactly one ## [Unreleased] heading")
+          release = re.fullmatch(r"bump: to v([0-9]+\.[0-9]+\.[0-9]+(?:-[0-9A-Za-z.-]+)?)", description)
+          if release:
+              # Release PRs belong directly under their version, even after an earlier insertion.
+              version = release.group(1)
+              lines = [line for line in lines if not (line.startswith("- ") and link in line)]
+              heading = rf"## \[{re.escape(version)}\](?:\([^)]*\))?"
+              headings = [i for i, line in enumerate(lines) if re.fullmatch(heading, line.strip())]
+              if len(headings) != 1:
+                  sys.exit(f"Release PR requires exactly one ## [{version}] heading")
+          start = headings[0] + 1
+          end = next((i for i in range(start, len(lines)) if lines[i].startswith("## ")), len(lines))
+          # Preserve the location of entries already organized into release sections.
+          existing = [i for i, line in enumerate(lines) if line.startswith("- ") and link in line]
+          if existing:
+              lines[existing[0]] = entry
+              for index in reversed(existing[1:]):
+                  del lines[index]
+          else:
+              first = next((i for i in range(start, end) if lines[i].strip()), end)
+              padding = [""] if (release or first == end) and first < len(lines) else []
+              lines[start:first] = ["", entry, *padding]
+          updated = "\n".join(lines) + "\n"
+          check(updated)
+          if updated != original:
+              if os.environ["CAN_COMMIT"] != "true":
+                  sys.exit("Update CHANGELOG.md for this PR manually, or configure CHANGELOG_TOKEN for automatic commits. No GITHUB_TOKEN source push was made.")
+              path.write_text(updated, encoding="utf-8")
+          PY
+
+      - name: changelog-commit
+        id: commit
+        env:
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          PR_BRANCH: ${{ github.event.pull_request.head.ref }}
+        run: |
+          if git diff --quiet -- CHANGELOG.md; then
+            echo "head=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add -- CHANGELOG.md
+          git commit -m "docs(changelog): update PR #${PR_NUMBER}"
+          git push origin "HEAD:refs/heads/${PR_BRANCH}"
+          echo "head=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"

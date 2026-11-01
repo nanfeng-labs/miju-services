@@ -1,0 +1,78 @@
+name: cargo-publish
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    uses: ./.github/workflows/ci.yaml
+
+  audit:
+    uses: ./.github/workflows/audit.yaml
+
+  publish:
+    name: publish-crate
+    runs-on: ubuntu-latest
+    needs: [test, audit]
+    timeout-minutes: 30
+    concurrency:
+      group: crates-io-publish
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions-rust-lang/setup-rust-toolchain@v2
+        with:
+          toolchain: stable
+      - name: validate-version
+        id: version
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          cargo metadata --format-version 1 --no-deps --locked > "$RUNNER_TEMP/release-metadata.json"
+          python3 -I - "$RUNNER_TEMP/release-metadata.json" <<'PY'
+          import json, os, sys, urllib.error, urllib.request
+
+          with open(sys.argv[1], encoding="utf-8") as file:
+              metadata = json.load(file)
+          packages = metadata["packages"]
+          if len(packages) != 1 or packages[0]["name"] != "miju-services":
+              sys.exit("Release must contain only the miju-services package")
+          package = packages[0]
+          name, version = package["name"], package["version"]
+          if os.environ["RELEASE_TAG"] != f"v{version}":
+              sys.exit(f"Release tag must be v{version}")
+          if package["publish"] not in (None, ["crates-io"]):
+              sys.exit("miju-services must be publishable to crates-io")
+          for dependency in package["dependencies"]:
+              if dependency.get("path") or dependency["source"] != "registry+https://github.com/rust-lang/crates.io-index":
+                  sys.exit("Release dependencies must use the crates.io registry")
+          request = urllib.request.Request(
+              f"https://index.crates.io/{name[:2]}/{name[2:4]}/{name}",
+              headers={"User-Agent": "miju-services-release"},
+          )
+          try:
+              with urllib.request.urlopen(request, timeout=30) as response:
+                  entries = [json.loads(line) for line in response.read().splitlines()]
+          except urllib.error.HTTPError as error:
+              if error.code != 404:
+                  raise
+              entries = []
+          existing = next((entry for entry in entries if entry["vers"] == version), None)
+          if existing is not None and (existing["name"] != name or existing["yanked"]):
+              sys.exit("Existing version has an unexpected name or is yanked")
+          state = "published" if existing is not None else "pending"
+          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as output:
+              print(f"state={state}", file=output)
+          print(f"{name} {version}: {state}")
+          PY
+      - name: publish miju-services
+        if: steps.version.outputs.state == 'pending'
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        run: cargo publish --registry crates-io --locked -p miju-services
