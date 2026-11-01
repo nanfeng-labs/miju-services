@@ -1,0 +1,40 @@
+[package]
+name = "miju-services"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.89"
+license = "MIT"
+repository = "https://github.com/nanfeng-labs/miju-services"
+description = "Application service lifecycles, managed work, and resource cleanup for miju"
+include = ["src/**", "examples/**", "tests/**", "Cargo.toml", "Cargo.lock", "README.md", "README.zh-CN.md", "assets/**", "LICENSE", "CHANGELOG.md"]
+
+[features]
+default = []
+## Emit structured lifecycle events without installing a subscriber.
+tracing = ["dep:tracing"]
+## Generate feature documentation.
+docsrs = ["dep:document-features"]
+
+[dependencies]
+tokio = { version = "1.53.3", features = ["rt", "sync", "time", "macros"] }
+tokio-util = { version = "0.7.20", features = ["rt"] }
+futures-util = "0.3.34"
+thiserror = "2"
+tracing = { version = "0.1", optional = true }
+document-features = { version = "0.2", optional = true }
+
+[dev-dependencies]
+tokio = { version = "1.53.3", features = ["rt-multi-thread", "test-util", "net", "io-util"] }
+
+[lints.rust]
+unsafe_code = "forbid"
+missing_docs = "warn"
+missing_debug_implementations = "warn"
+unreachable_pub = "warn"
+
+[lints.clippy]
+await_holding_lock = "warn"
+
+[package.metadata.docs.rs]
+all-features = true
+rustdoc-args = ["--cfg", "docsrs"]

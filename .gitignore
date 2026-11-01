@@ -1,0 +1,19 @@
+# OS / Editor
+.DS_Store
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Rust 构建产物
+/target/
+**/*.rs.bk
+
+# Temporary files
+tmp/
+.temp/
+/.tools/
+
+# 本地会话工具目录
+.claude/
+AGENTS.md

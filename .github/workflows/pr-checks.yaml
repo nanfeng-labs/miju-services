@@ -1,0 +1,81 @@
+name: pr-checks
+
+on:
+  pull_request:
+    types: [opened, reopened, synchronize, edited, ready_for_review, labeled, unlabeled]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: pr-checks-${{ github.event.pull_request.number }}
+  # Do not cancel preparation while its changelog push is in progress.
+  cancel-in-progress: false
+
+jobs:
+  prepare:
+    if: >-
+      github.event.pull_request.head.repo.full_name == github.repository &&
+      github.event.pull_request.user.login != 'dependabot[bot]' &&
+      github.actor != 'dependabot[bot]'
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: ./.github/workflows/update-changelog.yaml
+    secrets:
+      CHANGELOG_TOKEN: ${{ secrets.CHANGELOG_TOKEN }}
+
+  title:
+    name: pr-title
+    needs: prepare
+    if: ${{ !cancelled() }}
+    runs-on: ubuntu-latest
+    permissions:
+      pull-requests: read
+    steps:
+      - name: require-preparation
+        if: needs.prepare.result == 'failure'
+        run: exit 1
+      - name: pr-title
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          gh api "repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER" --jq '{number, title, user}' > "$RUNNER_TEMP/pr.json"
+          python3 -I - "$RUNNER_TEMP/pr.json" <<'PY'
+          import json, re, sys
+
+          with open(sys.argv[1], encoding="utf-8") as file:
+              pr = json.load(file)
+          title = pr["title"]
+          if not title.strip() or any(char in title for char in ("\n", "\r", "\0")):
+              sys.exit("PR title must be a nonempty single line")
+          if pr["user"]["login"] == "dependabot[bot]":
+              print("Dependabot title accepted without a PR-number reference")
+              sys.exit(0)
+          matches = list(re.finditer(r"(?<!\w)#([1-9][0-9]*)(?![0-9A-Za-z_.])", title))
+          if title.count("#") != 1 or len(matches) != 1 or matches[0].group(1) != str(pr["number"]):
+              sys.exit("Title must contain exactly one #N matching this PR")
+          match = matches[0]
+          if not (title[:match.start()] + title[match.end():]).strip():
+              sys.exit("Title must include a description")
+          print("PR title passed")
+          PY
+
+  content:
+    name: pr-content
+    needs: prepare
+    if: ${{ !cancelled() }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: read
+    steps:
+      - name: require-preparation
+        if: needs.prepare.result == 'failure'
+        run: exit 1
+      - name: pr-changelog
+        if: github.event.pull_request.user.login != 'dependabot[bot]'
+        uses: dangoslen/changelog-enforcer@v3
+        with:
+          skipLabels: skip-changelog

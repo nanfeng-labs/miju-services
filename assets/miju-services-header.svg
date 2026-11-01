@@ -1,0 +1,94 @@
+<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" width="1600" height="760" viewBox="0 0 1600 760" role="img" aria-labelledby="header-title header-desc">
+<title id="header-title">miju-services</title>
+<desc id="header-desc">Citrus miju lettering, an orange services suffix, and a play symbol enclosed by a lifecycle arc.</desc>
+<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" x="0" y="0" width="1600" height="600" viewBox="0 0 1600 600" fill="none" role="img" aria-labelledby="title desc">
+  <title id="title">miju</title>
+  <desc id="desc">A playful orange miju wordmark with a citrus slice above the i, a white sticker border, and small code and workflow symbols.</desc>
+  <defs>
+    <linearGradient id="citrus" x1="330" y1="210" x2="1190" y2="470" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#FFB52C"/>
+      <stop offset=".47" stop-color="#FF9A24"/>
+      <stop offset="1" stop-color="#FF753F"/>
+    </linearGradient>
+    <linearGradient id="edge" x1="300" y1="250" x2="1240" y2="490" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#FFC154"/>
+      <stop offset="1" stop-color="#F56B36"/>
+    </linearGradient>
+    <g id="letters">
+      <path transform="translate(330 245) rotate(-5 160 110)" d="M 0,35 Q 0,10 25,10 L 54,10 Q 76,10 78,31 L 79,41 C 98,13 121,2 151,2 C 185,2 208,19 219,48 C 241,16 267,5 294,8 C 333,12 353,43 353,88 L 353,200 Q 353,225 329,225 L 296,225 Q 273,225 273,201 L 273,105 C 273,82 265,70 248,70 C 230,70 221,87 221,110 L 221,201 Q 221,225 197,225 L 164,225 Q 141,225 141,201 L 141,104 C 141,81 134,69 117,69 C 97,69 82,87 82,113 L 82,201 Q 82,225 58,225 L 24,225 Q 0,225 0,201 Z"/>
+      <path transform="translate(724 254) rotate(5 40 100)" d="M 25,0 L 57,0 Q 81,0 81,24 L 81,191 Q 81,216 57,216 L 24,216 Q 0,216 0,192 L 0,26 Q 0,0 25,0 Z"/>
+      <path transform="translate(858 251) rotate(-3 40 110)" d="M 25,0 L 57,0 Q 81,0 81,25 L 81,194 C 81,258 48,288 -8,288 C -28,288 -43,285 -53,278 Q -64,272 -61,257 L -55,228 Q -52,213 -36,216 C -11,222 1,213 1,190 L 1,25 Q 1,0 25,0 Z"/>
+      <path transform="translate(993 249) rotate(3 114 110)" d="M 25,0 L 57,0 Q 81,0 81,25 L 81,116 C 81,146 91,160 112,160 C 139,160 153,139 153,109 L 153,25 Q 153,0 178,0 L 211,0 Q 235,0 235,25 L 235,192 Q 235,216 211,216 L 183,216 Q 161,216 159,195 L 158,183 C 141,207 116,221 87,221 C 30,221 0,187 0,129 L 0,25 Q 0,0 25,0 Z"/>
+      <path d="M 877,154 C 897,147 920,154 926,173 C 934,194 920,216 899,222 C 877,228 856,220 851,200 C 845,179 856,161 877,154 Z"/>
+    </g>
+    <mask id="letter-face" maskUnits="userSpaceOnUse" x="290" y="130" width="990" height="440">
+      <use xlink:href="#letters" fill="#FFF"/>
+    </mask>
+    <mask id="letter-shadow" maskUnits="userSpaceOnUse" x="270" y="110" width="1020" height="485">
+      <use xlink:href="#letters" transform="translate(0 15)" fill="#FFF" stroke="#FFF" stroke-width="56" stroke-linejoin="round"/>
+    </mask>
+    <g id="orange">
+      <circle r="70" fill="#FF8C00"/>
+      <circle r="62.5" fill="#FFF5AF"/>
+      <g>
+        <path id="segment" d="M 0,0 L 0,-48 Q 3,-55 9,-54 C 21,-52 31,-47 34,-43 Q 38,-39 34,-34 Z" fill="inherit"/>
+        <use xlink:href="#segment" fill="#FFB12D"/>
+        <use xlink:href="#segment" transform="rotate(45)" fill="#FFC32F"/>
+        <use xlink:href="#segment" transform="rotate(90)" fill="#FFB12D"/>
+        <use xlink:href="#segment" transform="rotate(135)" fill="#FFC32F"/>
+        <use xlink:href="#segment" transform="rotate(180)" fill="#FFB12D"/>
+        <use xlink:href="#segment" transform="rotate(225)" fill="#FFC32F"/>
+        <use xlink:href="#segment" transform="rotate(270)" fill="#FFB12D"/>
+        <use xlink:href="#segment" transform="rotate(315)" fill="#FFC32F"/>
+      </g>
+      <circle r="10.5" fill="#FFF5AF"/>
+    </g>
+    <g id="code-accent"><path d="M 27,25 6,50 27,75 M 73,25 94,50 73,75 M 59,13 41,87"/></g>
+    <g id="package-accent"><path d="M28 23 A35 35 0 1 1 17 66 M28 23 H10 M28 23 V5"/><path d="M38 36 L38 65 L62 50 Z"/></g>
+  </defs>
+
+  <g transform="translate(0 -20)">
+  <!-- A loose dotted orbit suggests tasks moving through a workflow. -->
+  <path d="M 250,317 C 259,156 478,124 660,148 M 978,155 C 1133,118 1365,161 1372,295 C 1381,429 1198,523 1037,517 M 701,517 C 513,538 300,474 251,383" stroke="#FFCE8B" stroke-width="4" stroke-linecap="round" stroke-dasharray="13 24"/>
+
+  <!-- Solid offset contours retain the sticker effect at small sizes. -->
+  <rect x="270" y="110" width="1020" height="485" fill="url(#edge)" mask="url(#letter-shadow)"/>
+  <use xlink:href="#letters" fill="#FFF" stroke="#FFF" stroke-width="56" stroke-linejoin="round"/>
+  <rect x="290" y="130" width="990" height="440" fill="url(#citrus)" mask="url(#letter-face)"/>
+
+  <!-- The organization citrus mark becomes the dot of the i. -->
+  <g transform="translate(770 154) rotate(-12)">
+    <circle cy="12" r="83" fill="#FFAD3C"/>
+    <circle r="83" fill="#FFF"/>
+    <use xlink:href="#orange"/>
+  </g>
+
+  <!-- A small unframed code sticker keeps the wordmark dominant. -->
+  <g transform="translate(213 220) rotate(-14 50 50) scale(.92)" fill="none" stroke-linecap="round" stroke-linejoin="round">
+    <use xlink:href="#code-accent" transform="translate(0 4)" stroke="#FFD99B" stroke-width="23"/>
+    <use xlink:href="#code-accent" stroke="#FFF" stroke-width="23"/>
+    <use xlink:href="#code-accent" stroke="#FFB14E" stroke-width="11"/>
+  </g>
+
+  <!-- A play mark and returning arc represent service execution and lifecycle. -->
+  <g transform="translate(1300 225) rotate(12 50 50) scale(.90)" fill="none" stroke-linecap="round" stroke-linejoin="round">
+    <use xlink:href="#package-accent" transform="translate(0 4)" stroke="#FFD99B" stroke-width="21"/>
+    <use xlink:href="#package-accent" stroke="#FFF" stroke-width="21"/>
+    <g stroke="#FFB14E" stroke-width="8">
+      <use xlink:href="#package-accent"/>
+
+    </g>
+  </g>
+
+  <!-- Small citrus-colored accents. -->
+  <path d="M 247,165 239,141 M 277,161 284,135" stroke="#FFC575" stroke-width="6" stroke-linecap="round"/>
+  <path d="M 1286,176 1290,151 M 1314,185 1331,167" stroke="#FFC575" stroke-width="6" stroke-linecap="round"/>
+  <path d="M 603,113 608,95 M 624,122 640,113" stroke="#FFCB7D" stroke-width="6" stroke-linecap="round"/>
+  <path d="M 329,402 338,415 354,419 341,428 337,444 328,431 312,427 325,418 Z" fill="#FFBD44"/>
+  <path d="M 1253,416 1259,427 1272,432 1260,438 1256,451 1249,439 1237,435 1249,429 Z" fill="#FFA13B"/>
+  <circle cx="1172" cy="158" r="6" fill="#FFC74B"/>
+  <circle cx="419" cy="510" r="6" fill="#FFB648"/>
+  </g>
+</svg>
+<text x="800" y="685" text-anchor="middle" font-family="Avenir Next, Arial, sans-serif" font-size="142" font-weight="800" letter-spacing="-5" fill="#FF922C" stroke="#fff" stroke-width="18" paint-order="stroke">services</text>
+</svg>
