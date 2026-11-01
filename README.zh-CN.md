@@ -41,15 +41,16 @@
 ## 安装
 
 需要 **Rust 1.89+**，以及由调用方持有、启用了时间功能的 Tokio 运行时。
-使用本地仓库时：
+这是预发布版本，安装时请显式填写 `0.1.0-beta`：
 
 ```toml
 [dependencies]
-miju-services = { path = "../miju-services", default-features = false }
+miju-services = { version = "0.1.0-beta", default-features = false }
 tokio = { version = "1.53.3", features = ["rt", "time", "sync", "macros"] }
 ```
 
 去掉 `default-features = false` 即可启用默认的 `miju` 和 `periodic` 接入能力。
+本地开发时，将 `version` 替换为 `path = "../miju-services"`。
 完整列表见 [Cargo features](#cargo-features)。
 
 ## 用法
