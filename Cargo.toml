@@ -29,7 +29,6 @@ tracing = { version = "0.1", optional = true }
 document-features = { version = "0.2", optional = true }
 
 [dev-dependencies]
-miju = { version = "0.2.0", default-features = false, features = ["retry"] }
 tower = { version = "0.5", features = ["util", "limit"] }
 tokio = { version = "1.53.3", features = ["rt-multi-thread", "test-util", "net", "io-util"] }
 
