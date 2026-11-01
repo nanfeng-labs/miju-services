@@ -127,18 +127,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "4744e383959f0db86ede514b809b1c53251889093803c05267acc7d4e7030d70"
 
 [[package]]
-name = "miju"
-version = "0.2.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "73c35bf6ce5eca7749fcad87b54c0f9dda5bf3c261ef09acc0dae8ab73f1d1ec"
-dependencies = [
- "miju-core",
- "pin-project",
- "thiserror",
- "tower",
-]
-
-[[package]]
 name = "miju-core"
 version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -163,7 +151,6 @@ version = "0.1.0"
 dependencies = [
  "document-features",
  "futures-util",
- "miju",
  "miju-core",
  "thiserror",
  "tokio",
