@@ -29,6 +29,9 @@ tracing = { version = "0.1", optional = true }
 document-features = { version = "0.2", optional = true }
 
 [dev-dependencies]
+axum = { version = "0.8.9", default-features = false, features = ["tokio", "http1", "ws"] }
+http-body = "1"
+tokio-tungstenite = "0.30"
 miju = { version = "0.2.0", default-features = false, features = ["retry"] }
 miju-cron = { version = "0.2.0", default-features = false, features = ["cron"] }
 cron = "0.17"
