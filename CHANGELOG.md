@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+- ci(dependabot): cover the standalone JNI example ([#9](https://github.com/nanfeng-labs/miju-services/pull/9))
+
 ## [0.1.0-beta]
 
 - bump: to v0.1.0-beta ([#8](https://github.com/nanfeng-labs/miju-services/pull/8))
