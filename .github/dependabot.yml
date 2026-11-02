@@ -1,8 +1,10 @@
 version: 2
 updates:
-  # Enable version updates for Cargo
+  # Check the library and the standalone JNI example.
   - package-ecosystem: "cargo"
-    directory: "/"
+    directories:
+      - "/"
+      - "/examples/jni"
     schedule:
       interval: "weekly"
       day: "monday"
