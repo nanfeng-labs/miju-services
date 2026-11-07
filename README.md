@@ -12,7 +12,7 @@
 
 `miju-services` is a Rust service foundation for [miju](https://github.com/nanfeng-labs/miju). It gives applications one place to assemble ordinary services, observe readiness and health, and wait for actual work and resource cleanup. The application owns its Tokio runtime, business configuration, resources, and logging setup.
 
-This unpublished `0.2` checkout implements ordinary lifecycles. The published `0.1.0-beta` has a different API. Other integrations follow in later batches.
+This unpublished `0.2` checkout implements ordinary lifecycles, application configuration and resource assembly. The published `0.1.0-beta` has a different API. Other integrations follow in later batches.
 
 ## Usage
 
@@ -93,6 +93,7 @@ let app = App::builder()
 
 Before `start` succeeds, bootstrap owns rollback. Keep independent access to resources needed for rollback: dropping a builder or an unstarted `App` cannot run asynchronous cleanup. `StartError::into_app()` recovers an app rejected because no Tokio runtime is active. After acceptance, the driver owns registered cleanup, including partial initialization failures. The [shared resource example](examples/shared_resource.rs) includes that application boundary and a concrete `Service` implementation.
 
+For multiple configuration sources, see [configured_app](examples/configured_app/README.md). It loads Default → explicit TOML → application environment → CLI, explains the effective sources, then assembles a file-backed sampler. Settings are validated before opening resources. The separate [watch example](examples/watched_settings.rs) shows one immutable configuration snapshot per round. Both stay outside the library's normal dependency tree.
 
 ### Readiness and health
 
@@ -156,6 +157,8 @@ The runtime must also have Tokio's time driver enabled. `start()` checks that a 
 | --- | --- |
 | [basic](examples/basic.rs) | Register a function and run until Ctrl-C. |
 | [shared_resource](examples/shared_resource.rs) | Typed settings, constructor injection, cleanup, and bootstrap rollback. |
+| [configured_app](examples/configured_app/README.md) | Multiple configuration sources, typed settings, centralized assembly, and file cleanup. |
+| [watched_settings](examples/watched_settings.rs) | Immutable per-round snapshots and application-owned configuration updates. |
 | [startup_failure](examples/startup_failure.rs) | Required initialization failure exits without a host signal. |
 | [managed_work](examples/managed_work.rs) | Finite prerequisites and service-owned background work. |
 | [operational_host](examples/operational_host.rs) | Observe failure from startup and choose an explicit second-signal policy. |

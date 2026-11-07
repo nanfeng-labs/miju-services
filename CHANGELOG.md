@@ -2,6 +2,7 @@
 
 ## [Unreleased]
 
+- feat(examples): add typed configuration and resource assembly ([#11](https://github.com/nanfeng-labs/miju-services/pull/11))
 - refactor(core): simplify application assembly and lifecycle control ([#10](https://github.com/nanfeng-labs/miju-services/pull/10))
 
 The local 0.2.0-beta.1 refactor is unreleased and includes breaking Rust API changes.
@@ -12,6 +13,8 @@ The local 0.2.0-beta.1 refactor is unreleased and includes breaking Rust API cha
 - Make shutdown wait for actual completion; use shutdown_within for Complete/Pending observation.
 - Drain service-owned work before dependency release and LIFO cleanup; preserve finite-service fault and completion semantics.
 - Keep advanced policy, work and observation types in their responsibility modules.
+- Add typed defaults → explicit TOML → application environment → CLI configuration, source reporting, resource assembly and bootstrap rollback examples.
+- Add immutable per-round watch snapshots and retain the last settings after sender closure.
 
 - ci(dependabot): cover the standalone JNI example ([#9](https://github.com/nanfeng-labs/miju-services/pull/9))
 
