@@ -1,5 +1,6 @@
 #![doc = include_str!("../README.md")]
-#![forbid(unsafe_code)]
+#![deny(unsafe_code)]
+#![cfg_attr(not(feature = "jni"), forbid(unsafe_code))]
 #![cfg_attr(docsrs, feature(doc_cfg))]
 
 pub mod app;
@@ -16,6 +17,10 @@ pub mod miju;
 #[cfg(feature = "periodic")]
 #[cfg_attr(docsrs, doc(cfg(feature = "periodic")))]
 pub mod periodic;
+
+#[cfg(feature = "jni")]
+#[cfg_attr(docsrs, doc(cfg(feature = "jni")))]
+pub mod jni;
 
 mod task;
 

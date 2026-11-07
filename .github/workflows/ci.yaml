@@ -70,6 +70,7 @@ jobs:
           toolchain: stable
           components: rustfmt
       - run: cargo fmt --all -- --check
+      - run: rustfmt --edition 2024 --check examples/jni/src/lib.rs
 
   clippy:
     name: cargo-clippy
@@ -108,3 +109,30 @@ jobs:
           cache-on-failure: true
       - run: cargo +nightly install cargo-udeps --locked
       - run: cargo +nightly udeps --workspace --all-targets --all-features --locked
+
+  jvm:
+    name: jvm (${{ matrix.os }}, JDK ${{ matrix.java }}, Rust ${{ matrix.rust }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+        java: ['17', '21']
+        rust: [stable, '1.89.0']
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions-rust-lang/setup-rust-toolchain@v2
+        with:
+          toolchain: ${{ matrix.rust }}
+      - uses: actions/setup-java@v6
+        with:
+          distribution: temurin
+          java-version: ${{ matrix.java }}
+      - name: Real JVM and UDP lifecycle
+        run: python3 examples/jni/run.py --java-home "$JAVA_HOME" --target-dir "$RUNNER_TEMP/jni-target" --output "$RUNNER_TEMP/jni-example" --toolchain '${{ matrix.rust }}'
+      - name: Preserve JVM diagnostics
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: jvm-${{ matrix.os }}-${{ matrix.java }}-${{ matrix.rust }}
+          path: ${{ runner.temp }}/jni-example

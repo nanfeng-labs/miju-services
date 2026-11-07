@@ -12,7 +12,7 @@
 
 `miju-services` is a Rust service foundation for [miju](https://github.com/nanfeng-labs/miju). It gives applications one place to assemble ordinary services and miju workers, observe readiness and health, and wait for actual work and resource cleanup. The application owns its Tokio runtime, business configuration, resources, and logging setup.
 
-This unpublished `0.2` checkout implements ordinary lifecycles, application configuration and resource assembly, real miju Worker/Monitor integration and direct periodic operations, and protocol/embedded hosts. The published `0.1.0-beta` has a different API. Other integrations follow in later batches.
+This unpublished `0.2` checkout includes ordinary lifecycles, application configuration/resource examples, miju Worker/Monitor integration, direct periodic operations, and protocol examples. The published `0.1.0-beta` has a different API. Optional JNI hosting uses `AppFactory` to assemble the same `App`; host acceptance is tracked separately.
 
 ## Usage
 
@@ -238,3 +238,9 @@ cargo clippy --all-targets --all-features --locked -- -D warnings
 ```
 
 CI runs separate check, test, format, Clippy, documentation, and unused-dependency jobs, with Linux/macOS/Windows test and Rust 1.89 coverage. Workflow configuration does not claim that a hosted run has completed.
+
+## JNI hosting
+
+Ordinary Rust applications keep their own Tokio runtime. With the default-off `jni` feature, implement `jni::AppFactory` to return an unstarted `App` and invoke `jni::export!` once for five Java static methods. The JNI owner retains one runtime per generation until work, cleanup and user references have actually released. A Java stop timeout ends only that observation.
+
+The unstarted App returned by the factory must be safe to drop synchronously. Acquire async-close resources inside service initialization and register cleanup before ready; builder cleanup is not pre-start rollback. See the [JNI example](examples/jni/README.md) for Rust assembly, Java declarations and a real UDP caller.
