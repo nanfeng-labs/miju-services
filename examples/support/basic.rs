@@ -1,7 +1,7 @@
-use miju_services::{App, BoxError, BuildError, ServiceContext};
+use miju_services::{BoxError, ServiceContext};
 use std::time::Duration;
 
-async fn heartbeat(context: ServiceContext) -> Result<(), BoxError> {
+pub(crate) async fn heartbeat(context: ServiceContext) -> Result<(), BoxError> {
     context.ready();
     loop {
         tokio::select! {
@@ -12,8 +12,4 @@ async fn heartbeat(context: ServiceContext) -> Result<(), BoxError> {
         }
     }
     Ok(())
-}
-
-pub(crate) fn assemble() -> Result<App, BuildError> {
-    App::builder().service_fn("heartbeat", heartbeat).build()
 }

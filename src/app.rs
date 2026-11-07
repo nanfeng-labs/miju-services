@@ -43,6 +43,10 @@ pub struct AppOptions {
     /// initialization gate; their business duration is not bounded by this value.
     pub startup_timeout: Duration,
     /// Shared cooperative stop interval, starting at the first stop request.
+    ///
+    /// Providers receive only the remainder after their consumers drain, possibly
+    /// no cooperative turn. Register required asynchronous teardown as cleanup;
+    /// this application-wide budget is not renewed for each provider.
     pub shutdown_grace: Duration,
     /// Extra confirmation interval before latching historical budget overrun.
     pub abort_wait: Duration,
@@ -331,6 +335,9 @@ impl App {
     /// Start an independent lifecycle driver on the current Tokio runtime.
     ///
     /// The host must enable time and keep the runtime alive through actual completion.
+    /// This checks only for a current runtime. A custom runtime without
+    /// `enable_time()` violates that precondition and can lose the driver after
+    /// service admission; it is not a recoverable [`StartError`].
     pub fn start(self) -> Result<AppHandle, StartError> {
         let runtime = match Handle::try_current() {
             Ok(runtime) => runtime,
@@ -380,6 +387,12 @@ impl App {
     }
 
     /// Run until actual termination or the host's stop signal, then await all cleanup.
+    ///
+    /// This wait has no deadline. Unconfirmed aggregate work, started blocking
+    /// work or pending cleanup can keep it waiting indefinitely. For bounded
+    /// observation, use [`start`](Self::start) and [`AppHandle::shutdown_within`];
+    /// a Pending result leaves responsibility owned by the driver and requires
+    /// the host to retain its runtime or choose an explicit process-exit policy.
     pub async fn run_until<F, E>(self, stop: F) -> Result<Arc<ExitReport>, RunError>
     where
         F: Future<Output = Result<(), E>> + Send,

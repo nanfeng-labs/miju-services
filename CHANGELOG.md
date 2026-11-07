@@ -2,6 +2,26 @@
 
 ## [Unreleased]
 
+- fix: improve snapshot compatibility and app examples ([#17](https://github.com/nanfeng-labs/miju-services/pull/17))
+
+### Breaking changes
+
+- Make `ServiceSnapshot` non-exhaustive so Cargo feature unification cannot
+  invalidate supported field patterns. Read fields directly or destructure with
+  `..`; external struct literals and exhaustive patterns are no longer supported.
+
+### Changed
+
+- State explicitly that `run_until` and `shutdown` have no deadline, and point
+  bounded callers to `start` plus `shutdown_within` and application exit policy.
+- Explain that dependency providers receive the remainder of the shared stop
+  grace, and required asynchronous teardown belongs in registered cleanup.
+- Show basic and managed-work assembly in their executable entry files.
+- Acquire the configured sampler's output during admitted initialization and
+  transfer cleanup before readiness, avoiding pre-start file rollback in the
+  normal example. Track the actual file open as owned blocking work through
+  cancellation. Keep preconstructed-resource rollback regression coverage.
+
 ## [0.2.0-beta.1]
 
 - bump: to v0.2.0-beta.1 ([#16](https://github.com/nanfeng-labs/miju-services/pull/16))

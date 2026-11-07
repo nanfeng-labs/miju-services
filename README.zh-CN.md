@@ -234,7 +234,7 @@ let app = App::builder()
 
 `start` 接纳前，回滚归应用 bootstrap 负责。应用须保留回滚所需的独立访问能力；丢弃 builder 或尚未启动的 `App` 无法执行异步清理。缺少 Tokio 运行时导致的启动拒绝可用 `StartError::into_app()` 取回装配。接纳后，登记的清理归 driver 负责，包含部分初始化失败的收尾。[共享资源示例](examples/shared_resource.rs) 展示这个边界及具体 `Service` 实现。
 
-[configured_app](examples/configured_app/README.md) 展示默认值 → 显式 TOML → 应用环境变量 → CLI，解释各有效值的来源，在校验后打开文件并集中装配采样服务。[watch 示例](examples/watched_settings.rs) 另行展示每轮持有一份不可变配置快照。配置依赖只用于示例，不进入普通库消费者的依赖树。
+[configured_app](examples/configured_app/README.md) 展示默认值 → 显式 TOML → 应用环境变量 → CLI，解释各有效值的来源，再集中装配采样服务。服务在启动接纳后打开文件，并在就绪前登记 `defer_cleanup`；尚未启动的 App 无须回滚文件资源。[watch 示例](examples/watched_settings.rs) 另行展示每轮持有一份不可变配置快照。配置依赖只用于示例，不进入普通库消费者的依赖树。
 
 ### 就绪与健康
 
@@ -249,6 +249,12 @@ let app = App::builder()
 普通异步工作可在停止宽限后被 abort；已经开始的阻塞工作须合作结束。`WorkSpec::aggregate` 以明确完成契约覆盖外部执行体：只有正常 `Ok(())` 确认实际结束，错误或 panic 保留未确认责任。普通任务不需要使用它。
 
 宽限到期请求符合条件的 abort，不代表完成，也不允许清理越过工作。未结束的阻塞操作、外部未确认责任或挂起的清理都会保留 driver，阻止产生最终报告。
+
+`run_until()` 和 `shutdown()` 不设等待期限。需要有界观察时，使用 `start()` 取得句柄，再调用 `shutdown_within(duration)`；`Pending` 表示责任尚未结束。宿主可以保留运行时继续等待，或像 [operational_host](examples/operational_host.rs) 一样明确选择进程退出策略。超时不会释放资源，也不会生成最终报告。
+
+停止宽限从应用的首次停止请求起算，由全部服务共享。provider 只能使用消费者排空后的剩余时间，可能在获得合作停止的执行机会前就被 abort。必要的异步收尾应登记为 cleanup，不能只放在 provider 根的停止分支中。
+
+快照由 driver 提供。直接读取 `ServiceSnapshot` 字段，或在解构时使用 `..`，可避免其他依赖启用适配器 feature 后导致模式匹配无法编译。
 
 ### 嵌入式控制
 

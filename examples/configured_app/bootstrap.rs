@@ -2,82 +2,50 @@ use crate::{
     services::{SampleFile, Sampler},
     settings::Settings,
 };
-use miju_services::{App, BoxError, BuildError, ExitReport, RunError};
-use std::{future::Future, io, sync::Arc};
+use miju_services::{
+    App, BoxError, BuildError, Service,
+    work::{SpawnError, WorkSpec},
+};
+use std::{fs::OpenOptions, sync::Arc};
+use tokio::{fs::File, sync::oneshot};
 
-/// The application composition root: the output goes to the service constructor
-/// and its close action goes to the same App.
-pub(crate) fn assemble(settings: Settings, output: Arc<SampleFile>) -> Result<App, BuildError> {
-    let cleanup = output.clone();
+/// Register the service now; acquire its output only after start accepts.
+pub(crate) fn assemble(settings: Settings) -> Result<App, BuildError> {
     App::builder()
-        .cleanup("sample-file", move || async move {
-            cleanup.close().await?;
+        .service_fn("sampler", move |context| async move {
+            let path = settings.output_file().to_owned();
+            let (opened, output) = oneshot::channel();
+            // Retain the actual open even when the initializer is aborted.
+            let admission = context.work().spawn_blocking(
+                WorkSpec::new("open sample-file").fail_service(),
+                move |_| {
+                    let result = OpenOptions::new().create(true).append(true).open(path);
+                    let _ = opened.send(result);
+                    Ok::<(), std::io::Error>(())
+                },
+            );
+            match admission {
+                Ok(_) => {}
+                Err(SpawnError::Closed) if context.is_stopping() => return Ok(()),
+                Err(error) => return Err(error.into()),
+            }
+            let file = match output.await {
+                Ok(result) => result?,
+                Err(_) if context.is_stopping() => return Ok(()),
+                Err(error) => return Err(error.into()),
+            };
+            let output = Arc::new(SampleFile::from_writer(File::from_std(file)));
+            let cleanup = output.clone();
+            if let Err(rejected) =
+                context.defer_cleanup("sample-file", move || async move { cleanup.close().await })
+            {
+                rejected.into_inner()().await?;
+                return Err(BoxError::from(
+                    "sample-file cleanup registration was rejected",
+                ));
+            }
+            Sampler::new(settings, output).run(context).await?;
             Ok(())
         })
-        .service("sampler", Sampler::new(settings, output))
         .build()
-}
-
-pub(crate) async fn run<F, E>(
-    settings: Settings,
-    stop: F,
-) -> Result<Arc<ExitReport>, BootstrapError>
-where
-    F: Future<Output = Result<(), E>> + Send,
-    E: Into<BoxError> + Send + 'static,
-{
-    let output = Arc::new(
-        SampleFile::open(settings.output_file())
-            .await
-            .map_err(|source| BootstrapError {
-                source: source.into(),
-                rollback: None,
-            })?,
-    );
-    finish(assemble(settings, output.clone()), output, stop).await
-}
-
-/// Until start accepts, retain independent rollback access to the output.
-/// Choose recovery through StartError::into_app instead if you intend to retry;
-/// this bootstrap chooses rollback, so its returned App must not be retried.
-pub(crate) async fn finish<F, E>(
-    app: Result<App, BuildError>,
-    output: Arc<SampleFile>,
-    stop: F,
-) -> Result<Arc<ExitReport>, BootstrapError>
-where
-    F: Future<Output = Result<(), E>> + Send,
-    E: Into<BoxError> + Send + 'static,
-{
-    let app = match app {
-        Ok(app) => app,
-        Err(source) => {
-            return Err(BootstrapError {
-                source: source.into(),
-                rollback: output.close().await.err(),
-            });
-        }
-    };
-    match app.run_until(stop).await {
-        Ok(report) => Ok(report),
-        Err(source) => {
-            let rollback = if matches!(source, RunError::Start(_)) {
-                output.close().await.err()
-            } else {
-                None
-            };
-            Err(BootstrapError {
-                source: source.into(),
-                rollback,
-            })
-        }
-    }
-}
-
-#[derive(Debug, thiserror::Error)]
-#[error("application bootstrap failed: {source}; rollback error: {rollback:?}")]
-pub(crate) struct BootstrapError {
-    #[source]
-    pub(crate) source: BoxError,
-    pub(crate) rollback: Option<io::Error>,
 }

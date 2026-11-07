@@ -88,7 +88,20 @@ pub enum ServiceFailure {
 }
 
 /// One service's latest state, also retained in the final report.
+///
+/// Read fields directly or use `..` when destructuring: enabled adapters may add
+/// observations through Cargo feature unification.
+///
+/// ```
+/// use miju_services::report::ServiceSnapshot;
+///
+/// fn name(snapshot: &ServiceSnapshot) -> &str {
+///     let ServiceSnapshot { id, .. } = snapshot;
+///     id.name()
+/// }
+/// ```
 #[derive(Clone, Debug)]
+#[non_exhaustive]
 pub struct ServiceSnapshot {
     /// Periodic invocation counters when this service uses the periodic adapter.
     #[cfg(feature = "periodic")]

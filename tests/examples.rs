@@ -1,8 +1,10 @@
 //! Exercise the same assembly functions used by the executable examples.
 
-#[path = "../examples/support/basic.rs"]
+#[allow(dead_code)]
+#[path = "../examples/basic.rs"]
 mod basic;
-#[path = "../examples/support/managed_work.rs"]
+#[allow(dead_code)]
+#[path = "../examples/managed_work.rs"]
 mod managed_work;
 #[path = "../examples/support/operational_host.rs"]
 mod operational_host;
