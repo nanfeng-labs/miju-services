@@ -1,157 +1,167 @@
-//! Owned snapshots and immutable shutdown results.
+//! Immutable state and completion results. A stop request is never a completion certificate.
 #![forbid(unsafe_code)]
 
 use crate::{
     SharedError,
     cleanup::CleanupReport,
-    service::{Criticality, ServiceId},
-    work::ScopeSnapshot,
+    service::{Criticality, Lifetime, ServiceId},
+    work::{ScopeSnapshot, WorkReport},
 };
-use std::sync::Arc;
+use std::{sync::Arc, time::Duration};
 
-/// Current application availability, independent of initialization.
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+/// Application-reported health, independent of initialization and phase.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum Health {
-    /// No health assertion is available.
+    /// No usable health declaration yet.
     #[default]
     Unknown,
-    /// The declared health condition holds.
+    /// Ready for normal operation.
     Healthy,
-    /// Usable with a known degradation.
+    /// Operational with reduced capability.
     Degraded,
-    /// The declared health condition does not hold.
+    /// Unable to perform the intended operation.
     Unhealthy,
 }
 
-/// Application lifecycle phase.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+/// Current application lifecycle phase.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Phase {
-    /// Required initialization is pending.
+    /// Required initialization has not completed.
     Starting,
-    /// Required initialization has completed.
+    /// All required initialization gates have completed.
     Running,
-    /// Services are being stopped in dependency order.
+    /// Stop was requested; dependency-ordered drain is in progress.
     Stopping,
-    /// Business work is drained; registered cleanup is executing.
+    /// All service responsibility released; cleanup is in progress.
     Cleaning,
-    /// All owned work and cleanup have ended.
+    /// Final report published after all cleanup actually finished.
     Terminated,
 }
 
-/// The actual result of a root execution body.
-#[derive(Clone, Debug)]
-pub enum RootOutcome {
-    /// The root returned successfully.
-    Succeeded,
-    /// The root returned an application error.
-    Failed(SharedError),
-    /// The root unwound.
-    Panicked(Arc<str>),
-    /// The root was forcibly cancelled.
-    Aborted,
-    /// Stop prevented the root from starting.
+/// Current position of a service root and its work scope.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ServicePhase {
+    /// Dependencies have not admitted the entry, or stop froze it before admission.
     NotStarted,
+    /// The entry is initializing.
+    Starting,
+    /// Initialization completed; the root may still run.
+    Running,
+    /// Local stop is active or the released root still owns work.
+    Draining,
+    /// The root and all accepted responsibility have released.
+    Completed,
 }
 
-/// Snapshot of one service and all its work responsibilities.
+/// Root execution result, published only after its captures release.
+#[derive(Clone, Debug)]
+pub enum ServiceOutcome {
+    /// The entry returned Ok.
+    Succeeded,
+    /// The original business error.
+    Failed(SharedError),
+    /// The entry unwound.
+    Panicked(Arc<str>),
+    /// Stop arrived before the entry was invoked.
+    CancelledBeforeStart,
+    /// A started root was forcibly dropped after grace.
+    Aborted,
+}
+
+/// A lifecycle fault associated with a service.
+#[derive(Clone, Debug)]
+pub enum ServiceFailure {
+    /// Root execution failed.
+    Error(SharedError),
+    /// Root invocation or polling panicked.
+    Panic(Arc<str>),
+    /// A resident returned before its own stop request.
+    UnexpectedExit,
+    /// A Resident did not report readiness within the configured budget.
+    StartupTimeout,
+    /// A FailService work entry failed.
+    Work(Arc<WorkReport>),
+    /// Releasing the root's captures panicked.
+    ReleasePanic(Arc<str>),
+    /// The root needed forced cancellation.
+    Aborted,
+}
+
+/// One service's latest state, also retained in the final report.
 #[derive(Clone, Debug)]
 pub struct ServiceSnapshot {
-    /// Stable service identity.
+    /// Registered identity.
     pub id: ServiceId,
     /// Failure propagation policy.
     pub criticality: Criticality,
-    /// Initialization has met the service's lifetime-specific gate.
+    /// Expected root lifetime.
+    pub lifetime: Lifetime,
+    /// Root/scope progress.
+    pub phase: ServicePhase,
+    /// Latched initialization; finite services require successful actual drain.
     pub initialized: bool,
-    /// Last application health assertion.
+    /// Effective health; successful finite services contribute Healthy.
     pub health: Health,
-    /// Stage-specific stop has been requested.
-    pub stopping: bool,
-    /// Root execution result, available after its captures are released.
-    pub outcome: Option<RootOutcome>,
-    /// Forced root cancellation occurred, even if destruction subsequently panicked.
-    pub forced_abort: bool,
-    /// First lifecycle fault, including startup or work failures.
-    pub failure: Option<SharedError>,
-    /// Owned background responsibilities and bounded recent results.
+    /// Root result, when its captures have released.
+    pub outcome: Option<ServiceOutcome>,
+    /// Lifecycle faults, separate from nonfatal recorded work errors.
+    pub failures: Vec<ServiceFailure>,
+    /// Work still owned by this service and its bounded recent results.
     pub work: ScopeSnapshot,
-    /// A local stopping budget has elapsed.
+    /// Whether local stop has reached this service.
+    pub stopping: bool,
+    /// Whether this service has ever exceeded its stop confirmation budget.
     pub stop_budget_exceeded: bool,
-    /// A backend's asynchronous cleanup was not confirmed.
-    pub backend_cleanup_unconfirmed: bool,
-    /// Execution-chain errors observed without automatically failing the service.
-    pub execution_errors: u64,
-    /// Bounded recent execution errors with their source chains.
-    pub recent_execution_errors: Vec<SharedError>,
-    /// Periodic execution counters when this service uses the periodic adapter.
-    #[cfg(feature = "periodic")]
-    pub periodic: Option<crate::periodic::PeriodicSnapshot>,
 }
 
-/// An owned point-in-time view; updates may be coalesced.
+/// A coherent application observation. It does not authorize resource reuse.
 #[derive(Clone, Debug)]
 pub struct AppSnapshot {
-    /// Monotonically increasing publication revision.
-    pub revision: u64,
-    /// Current lifecycle phase.
+    /// Lifecycle phase.
     pub phase: Phase,
-    /// Required initialization and current health permit use.
+    /// Current traffic-admission readiness.
     pub ready: bool,
-    /// Aggregated current health.
+    /// Aggregate health, distinct from readiness and phase.
     pub health: Health,
-    /// Per-service responsibility snapshots.
+    /// Registered services in registration order.
     pub services: Vec<ServiceSnapshot>,
-    /// Label of the active cleanup, if any.
+    /// Cleanup action currently executing, if any.
     pub current_cleanup: Option<String>,
-    /// Number of cleanup actions not yet started.
-    pub pending_cleanup: usize,
-    /// A shutdown budget expired before actual completion.
+    /// Cleanup actions not yet started, in execution order.
+    pub pending_cleanup: Vec<String>,
+    /// Completed cleanup actions.
+    pub cleanup: Vec<CleanupReport>,
+    /// First-stop confirmation budget was exceeded; this fact never resets.
     pub budget_exceeded: bool,
-    /// The independent lifecycle driver was lost.
+    /// The runtime dropped the independent lifecycle driver before final completion.
     pub driver_lost: bool,
 }
 
-/// Actual termination after all tracked execution and cleanup ended.
+/// Final actual completion certificate for this application instance.
 #[derive(Clone, Debug)]
 pub struct ExitReport {
-    /// First global stop reason; later failures remain in service reports.
-    pub reason: Arc<str>,
-    /// Final service results.
-    pub services: Vec<ServiceSnapshot>,
-    /// Cleanup results in execution order.
-    pub cleanup: Vec<CleanupReport>,
-    /// Whether a budget conclusion was previously incomplete.
-    pub budget_exceeded: bool,
-    pub(crate) successful: bool,
+    /// Terminal snapshot after all owned work and cleanup release.
+    pub snapshot: Arc<AppSnapshot>,
+    /// Total elapsed application lifetime.
+    pub elapsed: Duration,
 }
 
 impl ExitReport {
-    /// All tracked execution has ended and all aggregate responsibility was confirmed.
+    /// A final report is emitted only after actual drain, including cleanup.
     pub fn is_drained(&self) -> bool {
         true
     }
 
-    /// No required lifecycle fault, forced abort, or cleanup failure occurred.
+    /// Whether required lifecycles and every cleanup succeeded without forced abort.
+    ///
+    /// Ordinary optional faults and recorded work errors remain visible without
+    /// failing the whole lifecycle. Historical budget overrun is not erased.
     pub fn is_success(&self) -> bool {
-        self.successful
+        self.snapshot.cleanup.iter().all(CleanupReport::is_success)
+            && self.snapshot.services.iter().all(|service| {
+                (service.criticality == Criticality::Optional || service.failures.is_empty())
+                    && !matches!(service.outcome, Some(ServiceOutcome::Aborted))
+                    && !service.work.was_aborted
+            })
     }
-}
-
-/// Immutable historical conclusion of the shared shutdown budget.
-#[derive(Clone, Debug)]
-pub enum ShutdownReport {
-    /// Actual termination was observed within the budget.
-    Completed(Arc<ExitReport>),
-    /// The driver continues to own the displayed responsibilities.
-    Incomplete(Arc<AppSnapshot>),
-}
-
-/// A bounded observation of actual termination; it does not initiate stop.
-#[derive(Clone, Debug)]
-pub enum DrainObservation {
-    /// Actual termination was observed.
-    Complete(Arc<ExitReport>),
-    /// Work or cleanup remains owned by the driver.
-    Pending(Arc<AppSnapshot>),
-    /// The driver was lost; this is not a completion certificate.
-    DriverLost(Arc<AppSnapshot>),
 }

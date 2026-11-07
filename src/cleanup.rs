@@ -1,100 +1,130 @@
-//! Initialization-time transfer of asynchronous cleanup responsibility.
+//! Named cleanup in one application-wide reverse registration order.
+//!
+//! Registration transfers responsibility at successful start or during service
+//! initialization. An unstarted [`App`](crate::App) cannot run asynchronous cleanup
+//! from Drop; bootstrap must retain independent rollback access until start succeeds.
 #![forbid(unsafe_code)]
 
-use crate::{BoxError, SharedError, util::lock};
-use futures_util::future::BoxFuture;
+use crate::{BoxError, SharedError};
 use std::{
     fmt,
     future::Future,
+    pin::Pin,
     sync::{Arc, Mutex},
 };
 
-/// An application-local cleanup identity.
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
+/// Identity allocated in cleanup registration order.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct CleanupId(pub(crate) u64);
 
-/// A rejected registration, retaining the original cleanup closure.
+impl CleanupId {
+    /// Application-local registration number.
+    pub fn get(self) -> u64 {
+        self.0
+    }
+}
+
+/// A rejected transfer that still owns the caller's cleanup closure.
 pub struct CleanupRejected<F> {
-    pub(crate) cleanup: F,
+    label: String,
+    close: F,
 }
 
 impl<F> CleanupRejected<F> {
-    /// Recover the closure and execute it or transfer responsibility elsewhere.
-    pub fn into_cleanup(self) -> F {
-        self.cleanup
+    pub(crate) fn new(label: String, close: F) -> Self {
+        Self { label, close }
+    }
+
+    /// Label of the resource whose responsibility was not accepted.
+    pub fn label(&self) -> &str {
+        &self.label
+    }
+
+    /// Recover the original closure for application-owned cleanup.
+    pub fn into_inner(self) -> F {
+        self.close
     }
 }
 
 impl<F> fmt::Debug for CleanupRejected<F> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str("CleanupRejected")
+        f.debug_struct("CleanupRejected")
+            .field("label", &self.label)
+            .finish_non_exhaustive()
     }
 }
 
 impl<F> fmt::Display for CleanupRejected<F> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str("initialization cleanup registration is closed")
+        write!(f, "cleanup registration closed for {}", self.label)
     }
 }
 
-impl<F> std::error::Error for CleanupRejected<F> {}
-
-/// Result of one cleanup after its body and captures have been released.
+/// Result of one actually completed cleanup action.
 #[derive(Clone, Debug)]
 pub struct CleanupReport {
     /// Registration identity.
     pub id: CleanupId,
-    /// Application-supplied label.
+    /// Application-supplied resource name.
     pub label: String,
-    /// Error or unwind diagnostic; absent on success.
+    /// Original close error, if any.
     pub error: Option<SharedError>,
+    /// Panic during invocation or polling, if any.
+    pub panic: Option<Arc<str>>,
+    /// Panic when releasing the close future, independently of its result.
+    pub release_panic: Option<Arc<str>>,
 }
 
-pub(crate) type CleanupFn = Box<dyn FnOnce() -> BoxFuture<'static, Result<(), BoxError>> + Send>;
+impl CleanupReport {
+    /// Whether close and release both succeeded.
+    pub fn is_success(&self) -> bool {
+        self.error.is_none() && self.panic.is_none() && self.release_panic.is_none()
+    }
+}
 
-pub(crate) struct Entry {
-    pub id: CleanupId,
-    pub label: String,
-    pub run: CleanupFn,
+pub(crate) type Close =
+    Box<dyn FnOnce() -> Pin<Box<dyn Future<Output = Result<(), BoxError>> + Send>> + Send>;
+
+pub(crate) struct Action {
+    pub(crate) id: CleanupId,
+    pub(crate) label: String,
+    pub(crate) close: Close,
 }
 
 #[derive(Default)]
-pub(crate) struct Stack {
-    entries: Mutex<Vec<Entry>>,
+pub(crate) struct Registry {
+    actions: Mutex<Vec<Action>>,
 }
 
-impl Stack {
-    pub(crate) fn push<F, Fut, E>(&self, label: String, cleanup: F) -> CleanupId
+impl Registry {
+    pub(crate) fn register<F, Fut, E>(
+        &self,
+        label: String,
+        close: F,
+    ) -> Result<CleanupId, CleanupRejected<F>>
     where
         F: FnOnce() -> Fut + Send + 'static,
         Fut: Future<Output = Result<(), E>> + Send + 'static,
         E: Into<BoxError> + Send + 'static,
     {
-        let run: CleanupFn =
-            Box::new(move || Box::pin(async move { cleanup().await.map_err(Into::into) }));
-        let mut entries = lock(&self.entries);
-        let id = CleanupId(entries.len() as u64);
-        entries.push(Entry { id, label, run });
-        id
+        let mut actions = self.actions.lock().unwrap();
+        let Some(id) = u64::try_from(actions.len())
+            .ok()
+            .and_then(|n| n.checked_add(1))
+        else {
+            drop(actions);
+            return Err(CleanupRejected::new(label, close));
+        };
+        let id = CleanupId(id);
+        actions.push(Action {
+            id,
+            label,
+            close: Box::new(move || crate::task::boxed(close())),
+        });
+        Ok(id)
     }
 
-    pub(crate) fn len(&self) -> usize {
-        lock(&self.entries).len()
+    pub(crate) fn take(&self) -> Vec<Action> {
+        std::mem::take(&mut *self.actions.lock().unwrap())
     }
-
-    pub(crate) fn pop(&self) -> Option<Entry> {
-        lock(&self.entries).pop()
-    }
-}
-
-impl fmt::Debug for Stack {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("CleanupStack")
-            .field("pending", &self.len())
-            .finish()
-    }
-}
-
-pub(crate) fn diagnostic(message: impl Into<String>) -> SharedError {
-    Arc::new(std::io::Error::other(message.into()))
 }

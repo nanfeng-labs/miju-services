@@ -1,46 +1,30 @@
 [package]
 name = "miju-services"
-version = "0.1.0-beta"
+version = "0.2.0-beta.1"
 edition = "2024"
 rust-version = "1.89"
 license = "MIT"
 repository = "https://github.com/nanfeng-labs/miju-services"
-description = "Application service lifecycles, managed work, and resource cleanup for miju"
-include = ["src/**", "examples/**", "tests/**", "Cargo.toml", "Cargo.lock", "README.md", "README.zh-CN.md", "assets/**", "LICENSE", "CHANGELOG.md"]
+description = "Application assembly, service lifecycles, owned work, and resource cleanup for miju"
+include = ["src/**/*.rs", "examples/**/*.rs", "tests/**/*.rs", "Cargo.toml", "Cargo.lock", "README.md", "README.zh-CN.md", "LICENSE", "CHANGELOG.md"]
 
 [features]
-default = ["miju", "periodic"]
-## Run serial periodic operations with explicit timing semantics.
-periodic = []
-## Integrate existing miju workers and monitors.
-miju = ["dep:miju-core"]
-## Emit structured lifecycle events without installing a subscriber.
-tracing = ["dep:tracing", "miju-core?/tracing"]
-## Generate feature documentation.
+default = []
+## Emit lifecycle warnings without installing a subscriber.
+tracing = ["dep:tracing"]
+## Generate the feature reference in documentation.
 docsrs = ["dep:document-features"]
-## Load an Application from a JVM through five static native methods.
-jni = ["dep:jni", "tokio/rt-multi-thread", "tokio/net"]
 
 [dependencies]
-jni = { version = "0.22.4", default-features = false, optional = true }
-miju-core = { version = "0.2.0", default-features = false, optional = true }
-tokio = { version = "1.53.3", features = ["rt", "sync", "time", "macros"] }
+tokio = { version = "1.54.1", features = ["rt", "sync", "time", "macros"] }
 tokio-util = { version = "0.7.20", features = ["rt"] }
-futures-util = "0.3.34"
-thiserror = "2"
-tracing = { version = "0.1", optional = true }
-document-features = { version = "0.2", optional = true }
+thiserror = "2.0.21"
+tracing = { version = "0.1.44", default-features = false, optional = true }
+document-features = { version = "0.2.12", optional = true }
+
 
 [dev-dependencies]
-axum = { version = "0.8.9", default-features = false, features = ["tokio", "http1", "ws"] }
-http-body = "1"
-tokio-tungstenite = "0.30"
-miju = { version = "0.2.0", default-features = false, features = ["retry"] }
-miju-cron = { version = "0.2.0", default-features = false, features = ["cron"] }
-cron = "0.17"
-futures-channel = { version = "0.3.34", features = ["sink"] }
-tower = { version = "0.5", features = ["util", "limit"] }
-tokio = { version = "1.53.3", features = ["rt-multi-thread", "test-util", "net", "io-util"] }
+tokio = { version = "1.54.1", features = ["rt-multi-thread", "test-util", "signal"] }
 
 [lints.rust]
 unsafe_code = "deny"
@@ -55,22 +39,5 @@ await_holding_lock = "warn"
 all-features = true
 rustdoc-args = ["--cfg", "docsrs"]
 
-[[example]]
-name = "miju_worker"
-required-features = ["miju"]
-
-[[example]]
-name = "miju_monitor"
-required-features = ["miju"]
-
-[[example]]
-name = "periodic"
-required-features = ["periodic"]
-
-[[example]]
-name = "cron_worker"
-required-features = ["miju"]
-
-[[example]]
-name = "bounded_queue_rounds"
-required-features = ["miju"]
+[package.metadata.cargo-udeps.ignore]
+normal = ["document-features"]

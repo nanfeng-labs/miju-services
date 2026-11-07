@@ -1,23 +1,24 @@
-//! Owned background work, bounded admission, and actual-completion observation.
+//! Bounded background work owned by a service.
 //!
-//! A scope belongs to one service. Closing admission does not cancel existing work.
-//! Dropping a handle only drops an observer. Aggregate work additionally requires
-//! a successful external completion certificate before the scope can drain.
+//! Closing a scope prevents new work. Stopping also notifies existing work;
+//! neither operation proves that it has finished. Only actual release permits
+//! dependencies and cleanup to proceed. An aggregate confirms external work
+//! with `Ok(())`; a failed aggregate retains its responsibility indefinitely.
 #![forbid(unsafe_code)]
 
-use crate::{BoxError, SharedError, service::ServiceId};
+use crate::{
+    BoxError, SharedError,
+    service::ServiceId,
+    task::{self, TaskOutcome, TaskResult},
+};
 use std::{
-    any::Any,
     collections::{BTreeMap, VecDeque},
     fmt,
     future::Future,
-    panic::{AssertUnwindSafe, catch_unwind},
-    pin::Pin,
     sync::{
         Arc, Mutex,
-        atomic::{AtomicU64, Ordering},
+        atomic::{AtomicBool, AtomicU64, Ordering},
     },
-    task::{Context, Poll},
 };
 use tokio::{
     runtime::Handle,
@@ -31,11 +32,11 @@ use tokio_util::{
 };
 
 /// An application-local, monotonically allocated work identity.
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, Hash)]
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct WorkId(u64);
 
 impl WorkId {
-    /// Return the numeric identity within this application instance.
+    /// Return the numeric identity within this application.
     pub fn get(self) -> u64 {
         self.0
     }
@@ -47,90 +48,90 @@ impl fmt::Display for WorkId {
     }
 }
 
-/// Admission and failure policy for one background execution.
+/// Admission and error policy for one execution.
 #[derive(Clone, Debug)]
 pub struct WorkSpec {
-    label: String,
+    label: Arc<str>,
     aggregate: bool,
     fail_service: bool,
 }
 
 impl WorkSpec {
-    /// Record failures without stopping the owning service.
+    /// Record errors without stopping the owning service.
     pub fn new(label: impl Into<String>) -> Self {
         Self {
-            label: label.into(),
+            label: Arc::from(label.into()),
             aggregate: false,
             fail_service: false,
         }
     }
 
-    /// Promote an execution error or panic to an owning-service failure.
+    /// Promote errors, panics and failed release to an owner lifecycle fault.
     #[must_use]
     pub fn fail_service(mut self) -> Self {
         self.fail_service = true;
         self
     }
 
-    /// Track external framework responsibility; only `Ok(())` confirms completion.
+    /// Own external work whose actual completion is certified by `Ok(())`.
     ///
-    /// External execution must start inside the admitted closure. Once started,
-    /// this work is never forcibly aborted by a scope. Failure retains its identity
-    /// and capacity indefinitely because dropping its driver proves no external drain.
+    /// Start external work inside the admitted factory. Once started, aggregate
+    /// work is never forcibly aborted. Errors retain its identity and capacity
+    /// because releasing an entry does not prove its external work has ended.
     pub fn aggregate(label: impl Into<String>) -> Self {
         Self {
-            label: label.into(),
+            label: Arc::from(label.into()),
             aggregate: true,
             fail_service: true,
         }
     }
 }
 
-/// A synchronous admission rejection; the submitted closure was not called.
+/// Admission failed before the factory was invoked.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
 pub enum SpawnError {
-    /// The service no longer accepts work.
+    /// The scope no longer accepts work.
     #[error("work admission is closed")]
     Closed,
-    /// All work slots are occupied, including unconfirmed aggregate work.
+    /// Queued, running and unconfirmed work occupy every slot.
     #[error("work capacity is exhausted")]
     AtCapacity,
-    /// The runtime could not accept the execution.
+    /// The runtime cannot accept this work.
     #[error("runtime is unavailable")]
     RuntimeUnavailable,
-    /// Blocking work cannot provide an aggregate completion certificate.
+    /// Blocking work cannot certify aggregate completion.
     #[error("aggregate work requires asynchronous spawn")]
     IncompatibleSpec,
-    /// The application has exhausted its work identity space.
+    /// This application's numeric identity space was exhausted.
     #[error("work identity space is exhausted")]
     IdentityExhausted,
 }
 
-/// Result of the execution entry, distinct from external completion.
+/// Execution result, independent of external completion.
 #[derive(Clone, Debug)]
 pub enum WorkOutcome {
     /// The entry returned successfully.
     Succeeded,
-    /// The entry returned a business error.
+    /// The original business error.
     Failed(SharedError),
-    /// The entry unwound; non-string payloads have a descriptive placeholder.
+    /// The entry unwound.
     Panicked(Arc<str>),
-    /// Stop won before the entry was invoked.
+    /// Cancellation won before the factory was invoked.
     CancelledBeforeStart,
-    /// A started ordinary asynchronous entry was forcibly cancelled.
+    /// A started ordinary future was forcibly dropped.
     Aborted,
 }
 
-/// Whether all responsibility covered by this work has actually ended.
+/// Whether all responsibility represented by a work item actually ended.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum WorkCompletion {
-    /// Execution captures were released and any external completion was certified.
+    /// The entry and captures were released, with any external completion certified.
     Confirmed,
-    /// The aggregate entry failed without a certificate for its external execution.
+    /// External completion is unknown after aggregate failure.
     Unconfirmed,
 }
 
-/// Immutable result, published after the entry and its captures are destroyed.
+/// Immutable result published after user captures have been released.
 #[derive(Clone, Debug)]
 pub struct WorkReport {
     owner: ServiceId,
@@ -138,18 +139,19 @@ pub struct WorkReport {
     label: Arc<str>,
     outcome: WorkOutcome,
     completion: WorkCompletion,
+    release_panic: Option<Arc<str>>,
     stop_requested: bool,
     finished_at: Instant,
-    forced_abort: bool,
+    was_aborted: bool,
 }
 
 impl WorkReport {
-    /// Owning service identity.
+    /// Owning service.
     pub fn owner(&self) -> &ServiceId {
         &self.owner
     }
 
-    /// Application-local work identity.
+    /// Application-local identity.
     pub fn id(&self) -> WorkId {
         self.id
     }
@@ -159,7 +161,7 @@ impl WorkReport {
         &self.label
     }
 
-    /// Entry result; inspect completion separately before releasing dependencies.
+    /// Business execution result.
     pub fn outcome(&self) -> &WorkOutcome {
         &self.outcome
     }
@@ -169,235 +171,268 @@ impl WorkReport {
         self.completion
     }
 
-    /// Whether a stop request had been observed when the result was published.
+    /// A destructor panic, retained alongside any original execution failure.
+    pub fn release_panic(&self) -> Option<&Arc<str>> {
+        self.release_panic.as_ref()
+    }
+
+    /// Whether stop had been requested at publication.
     pub fn stop_requested(&self) -> bool {
         self.stop_requested
     }
 
-    /// Whether a started asynchronous entry was forcibly dropped, even if its destructor panicked.
-    pub fn was_aborted(&self) -> bool {
-        self.forced_abort
-    }
-
-    /// Monotonic instant at which the business future returned or was cancelled.
+    /// Actual release observation time.
     pub fn finished_at(&self) -> Instant {
         self.finished_at
     }
+
+    /// Whether forced cancellation dropped a started ordinary future.
+    pub fn was_aborted(&self) -> bool {
+        self.was_aborted
+    }
 }
 
-/// Read-only stop capability for one execution.
+/// Execution type, determining which stop guarantees apply.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum WorkKind {
+    /// Cooperatively stopped, then abortable after the grace period.
+    Async,
+    /// Cannot be interrupted after the blocking entry starts.
+    Blocking,
+    /// Must certify completion of all external responsibility.
+    Aggregate,
+}
+
+/// One active or externally unconfirmed responsibility.
 #[derive(Clone, Debug)]
-pub struct WorkContext {
-    id: WorkId,
-    stop: CancellationToken,
+pub struct WorkSnapshot {
+    /// Application-local identity.
+    pub id: WorkId,
+    /// Display label.
+    pub label: Arc<str>,
+    /// Execution and cancellation contract.
+    pub kind: WorkKind,
+    /// Whether the user factory has begun.
+    pub started: bool,
+    /// Whether a cooperative stop was requested.
+    pub stopping: bool,
+    /// Entry result when external responsibility remains unconfirmed.
+    pub report: Option<Arc<WorkReport>>,
 }
 
-impl WorkContext {
-    /// Application-local work identity.
-    pub fn id(&self) -> WorkId {
-        self.id
-    }
-
-    /// Whether this work has been requested to stop.
-    pub fn is_stopping(&self) -> bool {
-        self.stop.is_cancelled()
-    }
-
-    /// Wait for the work's own stop request without taking cancellation authority.
-    pub async fn stopping(&self) {
-        self.stop.cancelled().await;
-    }
-}
-
-/// An observer and cooperative stop handle; dropping it does not cancel work.
-#[derive(Clone)]
-pub struct WorkHandle {
-    id: WorkId,
-    stop: CancellationToken,
-    result: watch::Receiver<Option<Arc<WorkReport>>>,
-}
-
-impl fmt::Debug for WorkHandle {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("WorkHandle")
-            .field("id", &self.id)
-            .field("stop_requested", &self.stop.is_cancelled())
-            .finish_non_exhaustive()
-    }
-}
-
-impl WorkHandle {
-    /// Application-local work identity.
-    pub fn id(&self) -> WorkId {
-        self.id
-    }
-
-    /// Request cooperative stop for this work only; this is idempotent.
-    pub fn stop(&self) {
-        self.stop.cancel();
-    }
-
-    /// Await the immutable entry result. Cancelling this wait does not cancel work.
-    ///
-    /// An unconfirmed aggregate result does not imply that its scope has drained.
-    pub async fn wait(&self) -> Arc<WorkReport> {
-        let mut receiver = self.result.clone();
-        loop {
-            if let Some(report) = receiver.borrow().clone() {
-                return report;
-            }
-            // Every accepted execution owns a completion guard, including unpolled tasks.
-            receiver
-                .changed()
-                .await
-                .expect("completion guard publishes before closing");
-        }
-    }
-}
-
-/// A bounded owned snapshot of a service's background-work responsibility.
+/// Current admission, execution and recent-result state for a service.
 #[derive(Clone, Debug)]
 pub struct ScopeSnapshot {
-    /// All identities still occupying capacity, including external completion debt.
-    pub active: Vec<WorkId>,
-    /// Labels for the active identities; labels are diagnostic, not unique keys.
-    pub active_labels: Vec<(WorkId, Arc<str>)>,
-    /// Number of entries whose responsibility has actually been confirmed complete.
-    pub completed: u64,
-    /// Number of failed or panicked entries, counted once even when unconfirmed.
-    pub failed: u64,
-    /// Number of started ordinary entries forcibly cancelled.
-    pub aborted: u64,
-    /// Most recent results, bounded by the application's configured retention.
+    /// Whether admission is closed.
+    pub closed: bool,
+    /// Queued, executing or externally unconfirmed work.
+    pub active: Vec<WorkSnapshot>,
+    /// Bounded recent results in completion order.
     pub recent: Vec<Arc<WorkReport>>,
-    /// Aggregate identities awaiting proof that external execution has ended.
-    pub unconfirmed: Vec<WorkId>,
-    /// First execution failure promoted by a `fail_service` or aggregate policy.
-    pub service_failure: Option<SharedError>,
+    /// Number of external responsibilities without completion certificates.
+    pub unconfirmed: usize,
+    /// Whether any started ordinary future was forcibly dropped.
+    pub was_aborted: bool,
+}
+
+struct AbortSlot {
+    handle: Option<AbortHandle>,
+    requested: bool,
+}
+
+struct Control {
+    id: WorkId,
+    stop: CancellationToken,
+    started: AtomicBool,
+    abort: Mutex<AbortSlot>,
+    result: watch::Sender<Option<Arc<WorkReport>>>,
+    changed: Arc<Notify>,
+}
+
+impl Control {
+    fn install(&self, handle: AbortHandle) {
+        let requested = {
+            let mut slot = self.abort.lock().expect("abort slot contains no user code");
+            let requested = slot.requested;
+            slot.handle = Some(handle.clone());
+            requested
+        };
+        if requested {
+            handle.abort();
+        }
+    }
+
+    fn abort(&self) {
+        let handle = {
+            let mut slot = self.abort.lock().expect("abort slot contains no user code");
+            slot.requested = true;
+            slot.handle.clone()
+        };
+        if let Some(handle) = handle {
+            handle.abort();
+        }
+    }
+
+    fn stop(&self) {
+        self.stop.cancel();
+        self.changed.notify_waiters();
+    }
 }
 
 struct Entry {
-    label: Arc<str>,
-    stop: CancellationToken,
-    aggregate: bool,
-    started: bool,
-    abort_requested: bool,
-    abort: Option<AbortHandle>,
-    unconfirmed: bool,
+    control: Arc<Control>,
+    spec: WorkSpec,
+    kind: WorkKind,
+    report: Option<Arc<WorkReport>>,
 }
 
-struct State {
+struct Gate {
     closed: bool,
-    stopping: bool,
-    active: BTreeMap<WorkId, Entry>,
-    completed: u64,
-    failed: u64,
-    aborted: u64,
+    entries: BTreeMap<WorkId, Entry>,
     recent: VecDeque<Arc<WorkReport>>,
-    service_failure: Option<SharedError>,
+    fault: Option<Arc<WorkReport>>,
+    was_aborted: bool,
 }
 
 struct Inner {
     owner: ServiceId,
-    max: usize,
-    recent_limit: usize,
+    capacity: usize,
+    recent: usize,
     runtime: Handle,
+    changed: Arc<Notify>,
     ids: Arc<AtomicU64>,
     tracker: TaskTracker,
-    state: Mutex<State>,
-    changed: Notify,
-    notify: Arc<Notify>,
+    gate: Mutex<Gate>,
 }
 
-/// A service's bounded admission and completion domain, excluding the root itself.
+/// A cloneable service-owned admission gate and actual-release barrier.
+///
+/// `close()` only closes admission; `wait()` does not request cancellation and
+/// does not include the service root. Dropping a scope or work handle does not
+/// cancel accepted work. Keep the application's runtime alive until it drains.
 #[derive(Clone)]
-pub struct WorkScope {
-    inner: Arc<Inner>,
-}
+pub struct WorkScope(Arc<Inner>);
 
 impl fmt::Debug for WorkScope {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("WorkScope")
-            .field("owner", &self.inner.owner)
-            .finish_non_exhaustive()
+            .field("owner", &self.0.owner)
+            .field("state", &self.snapshot())
+            .finish()
     }
 }
 
 impl WorkScope {
     pub(crate) fn new(
         owner: ServiceId,
-        max: usize,
+        capacity: usize,
         recent: usize,
         runtime: Handle,
-        notify: Arc<Notify>,
+        changed: Arc<Notify>,
         ids: Arc<AtomicU64>,
     ) -> Self {
-        Self {
-            inner: Arc::new(Inner {
-                owner,
-                max,
-                recent_limit: recent,
-                runtime,
-                ids,
-                tracker: TaskTracker::new(),
-                state: Mutex::new(State {
-                    closed: false,
-                    stopping: false,
-                    active: BTreeMap::new(),
-                    completed: 0,
-                    failed: 0,
-                    aborted: 0,
-                    recent: VecDeque::new(),
-                    service_failure: None,
-                }),
-                changed: Notify::new(),
-                notify,
+        Self(Arc::new(Inner {
+            owner,
+            capacity,
+            recent,
+            runtime,
+            changed,
+            ids,
+            tracker: TaskTracker::new(),
+            gate: Mutex::new(Gate {
+                closed: false,
+                entries: BTreeMap::new(),
+                recent: VecDeque::new(),
+                fault: None,
+                was_aborted: false,
             }),
-        }
+        }))
     }
 
-    /// Admit and start asynchronous work on the application's saved runtime.
+    fn admit(
+        &self,
+        spec: WorkSpec,
+        kind: WorkKind,
+    ) -> Result<(Arc<Control>, TaskTrackerToken), SpawnError> {
+        let mut gate = self.0.gate.lock().expect("work gate contains no user code");
+        if gate.closed {
+            return Err(SpawnError::Closed);
+        }
+        if gate.entries.len() >= self.0.capacity {
+            return Err(SpawnError::AtCapacity);
+        }
+        let id = self
+            .0
+            .ids
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |id| id.checked_add(1))
+            .map(WorkId)
+            .map_err(|_| SpawnError::IdentityExhausted)?;
+        let (result, _) = watch::channel(None);
+        let control = Arc::new(Control {
+            id,
+            stop: CancellationToken::new(),
+            started: AtomicBool::new(false),
+            abort: Mutex::new(AbortSlot {
+                handle: None,
+                requested: false,
+            }),
+            result,
+            changed: self.0.changed.clone(),
+        });
+        let token = self.0.tracker.token();
+        gate.entries.insert(
+            id,
+            Entry {
+                control: control.clone(),
+                spec,
+                kind,
+                report: None,
+            },
+        );
+        Ok((control, token))
+    }
+
+    /// Accept one ordinary future or external aggregate before invoking its factory.
     ///
-    /// Admission is synchronous and races with `close` under the same gate.
-    /// Rejection drops captures outside the gate and does not invoke `run`.
+    /// Full and closed scopes reject immediately, without running the factory.
     pub fn spawn<F, Fut, E>(&self, spec: WorkSpec, run: F) -> Result<WorkHandle, SpawnError>
     where
         F: FnOnce(WorkContext) -> Fut + Send + 'static,
         Fut: Future<Output = Result<(), E>> + Send + 'static,
         E: Into<BoxError> + Send + 'static,
     {
-        let (handle, completion) = self.admit(spec)?;
-        let context = WorkContext {
-            id: handle.id,
-            stop: handle.stop.clone(),
+        let kind = if spec.aggregate {
+            WorkKind::Aggregate
+        } else {
+            WorkKind::Async
         };
-        let inner = self.inner.clone();
-        let id = handle.id;
-        let future = async move {
-            if !inner.begin(id) {
-                drop(run);
-                return WorkOutcome::CancelledBeforeStart;
-            }
-            match run(context).await {
-                Ok(()) => WorkOutcome::Succeeded,
-                Err(error) => WorkOutcome::Failed(Arc::from(error.into())),
-            }
-        };
-        let execution = Execution {
-            future: Some(Box::pin(future)),
-            completion,
-        };
-        let task = self.inner.runtime.spawn(execution);
-        self.inner.install_abort(id, task.abort_handle());
-        drop(task);
-        self.inner.notify.notify_one();
+        let (control, token) = self.admit(spec, kind)?;
+        let handle = WorkHandle(control.clone());
+        let entry = control.clone();
+        let owner = self.clone();
+        let completed = control.clone();
+        let abort = task::spawn(
+            &self.0.runtime,
+            control.stop.clone(),
+            move || {
+                entry.started.store(true, Ordering::Release);
+                run(WorkContext {
+                    id: entry.id,
+                    stop: entry.stop.clone(),
+                })
+            },
+            move |result| {
+                owner.finish(&completed, result);
+                drop(token);
+                owner.0.changed.notify_waiters();
+            },
+        );
+        control.install(abort);
+        self.0.changed.notify_waiters();
         Ok(handle)
     }
 
-    /// Admit blocking work, retaining responsibility until the closure really exits.
-    ///
-    /// An already started blocking closure cannot be killed by `abort`. It must
-    /// cooperate with its context or finish naturally. Aggregate specs are rejected.
+    /// Accept blocking work; once started it must finish cooperatively.
     pub fn spawn_blocking<F, E>(&self, spec: WorkSpec, run: F) -> Result<WorkHandle, SpawnError>
     where
         F: FnOnce(WorkContext) -> Result<(), E> + Send + 'static,
@@ -406,109 +441,108 @@ impl WorkScope {
         if spec.aggregate {
             return Err(SpawnError::IncompatibleSpec);
         }
-        let (handle, completion) = self.admit(spec)?;
-        let context = WorkContext {
-            id: handle.id,
-            stop: handle.stop.clone(),
-        };
-        let mut body = BlockingBody {
-            run: Some(run),
-            completion,
-        };
-        let id = handle.id;
-        let task = self.inner.runtime.spawn_blocking(move || {
-            if !body.completion.inner.begin(id) {
-                return;
-            }
-            let outcome = match catch_unwind(AssertUnwindSafe(|| {
-                match body.run.take().expect("blocking entry is invoked once")(context) {
-                    Ok(()) => WorkOutcome::Succeeded,
-                    Err(error) => WorkOutcome::Failed(Arc::from(error.into())),
-                }
-            })) {
-                Ok(outcome) => outcome,
-                Err(payload) => WorkOutcome::Panicked(panic_message(payload)),
-            };
-            body.completion.finish(outcome, Instant::now());
-        });
-        self.inner.install_abort(id, task.abort_handle());
-        drop(task);
-        self.inner.notify.notify_one();
+        let (control, token) = self.admit(spec, WorkKind::Blocking)?;
+        let handle = WorkHandle(control.clone());
+        let entry = control.clone();
+        let owner = self.clone();
+        let completed = control.clone();
+        let abort = task::spawn_blocking(
+            &self.0.runtime,
+            control.stop.clone(),
+            move || {
+                entry.started.store(true, Ordering::Release);
+                run(WorkContext {
+                    id: entry.id,
+                    stop: entry.stop.clone(),
+                })
+            },
+            move |result| {
+                owner.finish(&completed, result);
+                drop(token);
+                owner.0.changed.notify_waiters();
+            },
+        );
+        control.install(abort);
+        self.0.changed.notify_waiters();
         Ok(handle)
     }
 
-    fn admit(&self, spec: WorkSpec) -> Result<(WorkHandle, Completion), SpawnError> {
-        let label: Arc<str> = spec.label.into();
-        let stop = CancellationToken::new();
-        let (send, receive) = watch::channel(None);
-        let mut state = self.inner.state.lock().expect("work gate poisoned");
-        if state.closed {
-            return Err(SpawnError::Closed);
-        }
-        if state.active.len() >= self.inner.max {
-            return Err(SpawnError::AtCapacity);
-        }
-        // `try_update` is still unstable on the Rust 1.89 MSRV.
-        #[allow(deprecated)]
-        let id = WorkId(
-            self.inner
-                .ids
-                .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |value| {
-                    value.checked_add(1)
-                })
-                .map_err(|_| SpawnError::IdentityExhausted)?,
-        );
-        let token = self.inner.tracker.token();
-        state.active.insert(
-            id,
-            Entry {
-                label: label.clone(),
-                stop: stop.clone(),
-                aggregate: spec.aggregate,
-                started: false,
-                abort_requested: false,
-                abort: None,
-                unconfirmed: false,
-            },
-        );
-        drop(state);
-        let completion = Completion {
-            inner: self.inner.clone(),
-            id,
-            label,
-            aggregate: spec.aggregate,
-            fail_service: spec.fail_service,
-            stop: stop.clone(),
-            result: Some(send),
-            token: Some(token),
-            forced_abort: false,
+    fn finish(&self, control: &Control, result: TaskResult) {
+        let outcome = match result.outcome {
+            TaskOutcome::Succeeded => WorkOutcome::Succeeded,
+            TaskOutcome::Failed(error) => WorkOutcome::Failed(error),
+            TaskOutcome::Panicked(message) => WorkOutcome::Panicked(message),
+            TaskOutcome::CancelledBeforeStart => WorkOutcome::CancelledBeforeStart,
+            TaskOutcome::Aborted => WorkOutcome::Aborted,
         };
-        Ok((
-            WorkHandle {
-                id,
-                stop,
-                result: receive,
-            },
-            completion,
-        ))
+        let (removed, evicted, report) = {
+            let mut gate = self.0.gate.lock().expect("work gate contains no user code");
+            let entry = gate
+                .entries
+                .get(&control.id)
+                .expect("accepted work publishes once");
+            let completion = if entry.kind != WorkKind::Aggregate
+                || matches!(outcome, WorkOutcome::CancelledBeforeStart)
+                || (matches!(outcome, WorkOutcome::Succeeded) && result.release_panic.is_none())
+            {
+                WorkCompletion::Confirmed
+            } else {
+                WorkCompletion::Unconfirmed
+            };
+            let fault = entry.spec.fail_service
+                && (!matches!(
+                    outcome,
+                    WorkOutcome::Succeeded | WorkOutcome::CancelledBeforeStart
+                ) || result.release_panic.is_some());
+            let report = Arc::new(WorkReport {
+                owner: self.0.owner.clone(),
+                id: control.id,
+                label: entry.spec.label.clone(),
+                outcome,
+                completion,
+                release_panic: result.release_panic,
+                stop_requested: control.stop.is_cancelled(),
+                finished_at: Instant::now(),
+                was_aborted: result.was_aborted,
+            });
+            gate.was_aborted |= report.was_aborted;
+            if fault && gate.fault.is_none() {
+                gate.fault = Some(report.clone());
+            }
+            let removed = if completion == WorkCompletion::Confirmed {
+                gate.entries.remove(&control.id)
+            } else {
+                gate.entries
+                    .get_mut(&control.id)
+                    .expect("entry retained")
+                    .report = Some(report.clone());
+                None
+            };
+            gate.recent.push_back(report.clone());
+            let mut evicted = Vec::new();
+            while gate.recent.len() > self.0.recent {
+                evicted.push(gate.recent.pop_front().expect("queue exceeds capacity"));
+            }
+            (removed, evicted, report)
+        };
+        let previous = control.result.send_replace(Some(report));
+        drop((removed, evicted, previous));
     }
 
-    /// Close admission without sending stop to any existing work.
+    /// Close admission without stopping already accepted work.
     pub fn close(&self) {
         {
-            let mut state = self.inner.state.lock().expect("work gate poisoned");
-            state.closed = true;
-            self.inner.tracker.close();
+            let mut gate = self.0.gate.lock().expect("work gate contains no user code");
+            gate.closed = true;
+            self.0.tracker.close();
         }
-        self.inner.changed.notify_waiters();
-        self.inner.notify.notify_one();
+        self.0.changed.notify_waiters();
     }
 
-    /// Wait for closed admission, actual execution release, and aggregate confirmation.
-    /// Cancelling this observer does not change the scope's responsibility.
+    /// Wait for closed admission and actual release of all responsibility.
     pub async fn wait(&self) {
         loop {
-            let changed = self.inner.changed.notified();
+            let changed = self.0.changed.notified();
             tokio::pin!(changed);
             changed.as_mut().enable();
             if self.is_drained() {
@@ -519,305 +553,141 @@ impl WorkScope {
     }
 
     pub(crate) fn stop(&self) {
-        let stops = {
-            let mut state = self.inner.state.lock().expect("work gate poisoned");
-            state.closed = true;
-            state.stopping = true;
-            self.inner.tracker.close();
-            state
-                .active
+        let controls = {
+            let mut gate = self.0.gate.lock().expect("work gate contains no user code");
+            gate.closed = true;
+            self.0.tracker.close();
+            gate.entries
                 .values()
-                .map(|entry| entry.stop.clone())
+                .map(|entry| entry.control.clone())
                 .collect::<Vec<_>>()
         };
-        for stop in stops {
-            stop.cancel();
+        for control in controls {
+            control.stop();
         }
-        self.inner.changed.notify_waiters();
-        self.inner.notify.notify_one();
-    }
-
-    pub(crate) fn is_stopping(&self) -> bool {
-        self.inner
-            .state
-            .lock()
-            .expect("work gate poisoned")
-            .stopping
+        self.0.changed.notify_waiters();
     }
 
     pub(crate) fn abort(&self) {
-        let handles = {
-            let mut state = self.inner.state.lock().expect("work gate poisoned");
-            state
-                .active
-                .values_mut()
-                .filter_map(|entry| {
-                    if entry.aggregate && entry.started {
-                        return None;
-                    }
-                    entry.abort_requested = true;
-                    entry.abort.clone()
+        let controls = {
+            let gate = self.0.gate.lock().expect("work gate contains no user code");
+            gate.entries
+                .values()
+                .filter(|entry| {
+                    entry.kind != WorkKind::Aggregate
+                        && (entry.kind == WorkKind::Async
+                            || !entry.control.started.load(Ordering::Acquire))
                 })
+                .map(|entry| entry.control.clone())
                 .collect::<Vec<_>>()
         };
-        for handle in handles {
-            handle.abort();
+        for control in controls {
+            control.abort();
         }
     }
 
     pub(crate) fn is_drained(&self) -> bool {
-        let state = self.inner.state.lock().expect("work gate poisoned");
-        state.closed && state.active.is_empty() && self.inner.tracker.is_empty()
+        let gate = self.0.gate.lock().expect("work gate contains no user code");
+        gate.closed && gate.entries.is_empty() && self.0.tracker.is_empty()
     }
 
-    #[cfg(test)]
-    pub(crate) fn has_service_failure(&self) -> bool {
-        self.inner
-            .state
+    pub(crate) fn fault(&self) -> Option<Arc<WorkReport>> {
+        self.0
+            .gate
             .lock()
-            .expect("work gate poisoned")
-            .service_failure
-            .is_some()
+            .expect("work gate contains no user code")
+            .fault
+            .clone()
     }
 
-    pub(crate) fn snapshot(&self) -> ScopeSnapshot {
-        let state = self.inner.state.lock().expect("work gate poisoned");
+    /// Return admission, active work and bounded recent results.
+    pub fn snapshot(&self) -> ScopeSnapshot {
+        let gate = self.0.gate.lock().expect("work gate contains no user code");
         ScopeSnapshot {
-            active: state.active.keys().copied().collect(),
-            active_labels: state
-                .active
-                .iter()
-                .map(|(id, entry)| (*id, entry.label.clone()))
+            closed: gate.closed,
+            active: gate
+                .entries
+                .values()
+                .map(|entry| WorkSnapshot {
+                    id: entry.control.id,
+                    label: entry.spec.label.clone(),
+                    kind: entry.kind,
+                    started: entry.control.started.load(Ordering::Acquire),
+                    stopping: entry.control.stop.is_cancelled(),
+                    report: entry.report.clone(),
+                })
                 .collect(),
-            completed: state.completed,
-            failed: state.failed,
-            aborted: state.aborted,
-            recent: state.recent.iter().cloned().collect(),
-            unconfirmed: state
-                .active
-                .iter()
-                .filter_map(|(id, entry)| entry.unconfirmed.then_some(*id))
-                .collect(),
-            service_failure: state.service_failure.clone(),
+            recent: gate.recent.iter().cloned().collect(),
+            unconfirmed: gate
+                .entries
+                .values()
+                .filter(|entry| entry.report.is_some())
+                .count(),
+            was_aborted: gate.was_aborted,
         }
     }
 }
 
-impl Inner {
-    fn begin(&self, id: WorkId) -> bool {
-        let mut state = self.state.lock().expect("work gate poisoned");
-        let stopping = state.stopping;
-        let entry = state
-            .active
-            .get_mut(&id)
-            .expect("accepted work remains registered");
-        if stopping || entry.stop.is_cancelled() || entry.abort_requested {
-            return false;
-        }
-        entry.started = true;
-        true
-    }
-
-    fn install_abort(&self, id: WorkId, handle: AbortHandle) {
-        let should_abort = {
-            let mut state = self.state.lock().expect("work gate poisoned");
-            if let Some(entry) = state.active.get_mut(&id) {
-                let abort = entry.abort_requested;
-                entry.abort = Some(handle.clone());
-                abort
-            } else {
-                false
-            }
-        };
-        if should_abort {
-            handle.abort();
-        }
-    }
-}
-
-fn panic_message(payload: Box<dyn Any + Send>) -> Arc<str> {
-    if let Some(message) = payload.downcast_ref::<String>() {
-        Arc::from(message.as_str())
-    } else if let Some(message) = payload.downcast_ref::<&str>() {
-        Arc::from(*message)
-    } else {
-        Arc::from("non-string panic payload")
-    }
-}
-
-struct Completion {
-    inner: Arc<Inner>,
+/// Read-only stop notification for one work item.
+#[derive(Clone, Debug)]
+pub struct WorkContext {
     id: WorkId,
-    label: Arc<str>,
-    aggregate: bool,
-    fail_service: bool,
     stop: CancellationToken,
-    result: Option<watch::Sender<Option<Arc<WorkReport>>>>,
-    token: Option<TaskTrackerToken>,
-    forced_abort: bool,
 }
 
-impl Completion {
-    fn cancelled_outcome(&self) -> WorkOutcome {
-        let state = self.inner.state.lock().expect("work gate poisoned");
-        if state
-            .active
-            .get(&self.id)
-            .is_some_and(|entry| entry.started)
-        {
-            WorkOutcome::Aborted
-        } else {
-            WorkOutcome::CancelledBeforeStart
-        }
+impl WorkContext {
+    /// Identity of this execution.
+    pub fn id(&self) -> WorkId {
+        self.id
     }
 
-    fn finish(&mut self, outcome: WorkOutcome, finished_at: Instant) {
-        let Some(result) = self.result.take() else {
-            return;
-        };
-        let failure = match &outcome {
-            WorkOutcome::Failed(error) => Some(error.clone()),
-            WorkOutcome::Panicked(message) => {
-                Some(Arc::new(std::io::Error::other(message.to_string())) as SharedError)
+    /// Whether cooperative stop was requested.
+    pub fn is_stopping(&self) -> bool {
+        self.stop.is_cancelled()
+    }
+
+    /// Wait for cooperative stop.
+    pub async fn stopping(&self) {
+        self.stop.cancelled().await;
+    }
+}
+
+/// Cloneable control and result observation for accepted work.
+///
+/// Dropping this handle or cancelling `wait()` does not cancel the work.
+#[derive(Clone)]
+pub struct WorkHandle(Arc<Control>);
+
+impl fmt::Debug for WorkHandle {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("WorkHandle")
+            .field("id", &self.id())
+            .finish_non_exhaustive()
+    }
+}
+
+impl WorkHandle {
+    /// Identity of this execution.
+    pub fn id(&self) -> WorkId {
+        self.0.id
+    }
+
+    /// Request cooperative stop for only this work item.
+    pub fn stop(&self) {
+        self.0.stop();
+    }
+
+    /// Wait for the entry result; check its completion certificate separately.
+    pub async fn wait(&self) -> Arc<WorkReport> {
+        let mut result = self.0.result.subscribe();
+        loop {
+            if let Some(report) = result.borrow_and_update().clone() {
+                return report;
             }
-            _ => None,
-        };
-        let completion = if self.aggregate
-            && !matches!(
-                outcome,
-                WorkOutcome::Succeeded | WorkOutcome::CancelledBeforeStart
-            ) {
-            WorkCompletion::Unconfirmed
-        } else {
-            WorkCompletion::Confirmed
-        };
-        let forced_abort = self.forced_abort || matches!(outcome, WorkOutcome::Aborted);
-        let report = Arc::new(WorkReport {
-            owner: self.inner.owner.clone(),
-            id: self.id,
-            label: self.label.clone(),
-            outcome,
-            completion,
-            stop_requested: self.stop.is_cancelled(),
-            finished_at,
-            forced_abort,
-        });
-        let (removed, evicted) = {
-            let mut state = self.inner.state.lock().expect("work gate poisoned");
-            if failure.is_some() {
-                state.failed = state.failed.saturating_add(1);
-            }
-            if report.forced_abort {
-                state.aborted = state.aborted.saturating_add(1);
-            }
-            if self.fail_service && state.service_failure.is_none() {
-                state.service_failure = failure;
-            }
-            let removed = if completion == WorkCompletion::Confirmed {
-                state.completed = state.completed.saturating_add(1);
-                state.active.remove(&self.id)
-            } else {
-                let entry = state
-                    .active
-                    .get_mut(&self.id)
-                    .expect("unconfirmed work stays registered");
-                entry.unconfirmed = true;
-                None
-            };
-            let evicted = if self.inner.recent_limit > 0 {
-                state.recent.push_back(report.clone());
-                if state.recent.len() > self.inner.recent_limit {
-                    state.recent.pop_front()
-                } else {
-                    None
-                }
-            } else {
-                None
-            };
-            (removed, evicted)
-        };
-        // Last user error references may run reentrant destructors; never drop them under the gate.
-        drop(removed);
-        drop(evicted);
-        let previous = result.send_replace(Some(report));
-        drop(previous);
-        drop(self.token.take());
-        self.inner.changed.notify_waiters();
-        self.inner.notify.notify_one();
-    }
-}
-
-impl Drop for Completion {
-    fn drop(&mut self) {
-        if self.result.is_some() {
-            self.finish(self.cancelled_outcome(), Instant::now());
+            result
+                .changed()
+                .await
+                .expect("the control retains its result sender");
         }
     }
 }
-
-struct Execution<F: Future<Output = WorkOutcome>> {
-    future: Option<Pin<Box<F>>>,
-    completion: Completion,
-}
-
-impl<F: Future<Output = WorkOutcome>> Future for Execution<F> {
-    type Output = ();
-
-    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<()> {
-        let this = self.get_mut();
-        let outcome = match catch_unwind(AssertUnwindSafe(|| {
-            this.future
-                .as_mut()
-                .expect("execution polled after completion")
-                .as_mut()
-                .poll(cx)
-        })) {
-            Ok(Poll::Pending) => return Poll::Pending,
-            Ok(Poll::Ready(outcome)) => outcome,
-            Err(payload) => WorkOutcome::Panicked(panic_message(payload)),
-        };
-        let finished_at = Instant::now();
-        let outcome = match catch_unwind(AssertUnwindSafe(|| drop(this.future.take()))) {
-            Ok(()) => outcome,
-            Err(payload) => WorkOutcome::Panicked(panic_message(payload)),
-        };
-        this.completion.finish(outcome, finished_at);
-        Poll::Ready(())
-    }
-}
-
-impl<F: Future<Output = WorkOutcome>> Drop for Execution<F> {
-    fn drop(&mut self) {
-        if self.completion.result.is_some() {
-            self.completion.forced_abort =
-                matches!(self.completion.cancelled_outcome(), WorkOutcome::Aborted);
-        }
-        let dropped = catch_unwind(AssertUnwindSafe(|| drop(self.future.take())));
-        if let Err(payload) = dropped {
-            self.completion.finish(
-                WorkOutcome::Panicked(panic_message(payload)),
-                Instant::now(),
-            );
-        }
-        // Completion's field destructor runs only after the user future is gone.
-    }
-}
-
-struct BlockingBody<F> {
-    run: Option<F>,
-    completion: Completion,
-}
-
-impl<F> Drop for BlockingBody<F> {
-    fn drop(&mut self) {
-        if let Err(payload) = catch_unwind(AssertUnwindSafe(|| drop(self.run.take()))) {
-            self.completion.finish(
-                WorkOutcome::Panicked(panic_message(payload)),
-                Instant::now(),
-            );
-        }
-    }
-}
-
-#[cfg(test)]
-mod tests;

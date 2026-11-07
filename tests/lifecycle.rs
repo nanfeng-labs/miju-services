@@ -1,1260 +1,978 @@
-//! Public lifecycle contracts, including deterministic shutdown interleavings.
-
-use std::{
-    future::Future,
-    sync::{Arc, Mutex},
-    time::Duration,
-};
+//! Caller-visible initialization, failure, ownership, and cleanup contracts.
 
 use miju_services::{
-    AppObserver, AppOptions, Application, BoxError, Criticality, DrainObservation, Health,
-    Lifetime, ReadyError, RootOutcome, ServiceContext, ServiceSpec, ShutdownReport, WorkSpec,
-    service_fn,
+    App, BoxError, RunError, ServiceContext,
+    app::AppOptions,
+    observe::{ReadyError, ShutdownProgress},
+    report::{Health, Phase, ServiceFailure, ServicePhase},
+    service::{Criticality, Lifetime, ServiceSpec},
+    work::WorkSpec,
 };
-use tokio::sync::oneshot;
+use std::{
+    future::pending,
+    io,
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicBool, Ordering},
+    },
+    time::Duration,
+};
+use tokio::sync::{Notify, oneshot};
 
-const LIMIT: Duration = Duration::from_secs(3);
-
-async fn bounded<F: Future>(future: F) -> F::Output {
-    tokio::time::timeout(LIMIT, future)
-        .await
-        .expect("public lifecycle operation did not finish")
+fn finite(name: &str) -> ServiceSpec {
+    ServiceSpec::new(name).lifetime(Lifetime::Finite)
 }
-
-fn announce(context: &ServiceContext) -> Result<(), BoxError> {
-    match context
-        .set_health(Health::Healthy)
-        .and_then(|()| context.ready())
-    {
-        Ok(()) => Ok(()),
-        Err(_) if context.is_stopping() => Ok(()),
-        Err(error) => Err(error.into()),
+fn short_options() -> AppOptions {
+    AppOptions {
+        startup_timeout: Duration::from_secs(3),
+        shutdown_grace: Duration::from_millis(40),
+        abort_wait: Duration::from_millis(10),
+        ..AppOptions::default()
     }
 }
-
-async fn wait_health(observer: &AppObserver, health: Health, ready: bool) {
-    bounded(async {
-        let mut changes = observer.subscribe();
-        loop {
-            let snapshot = changes.current();
-            if snapshot.health == health && snapshot.ready == ready {
-                break;
-            }
-            changes.changed().await.expect("observer closed too early");
-        }
-    })
-    .await;
+async fn resident(context: ServiceContext) -> Result<(), BoxError> {
+    context.ready();
+    context.stopping().await;
+    Ok(())
 }
 
 #[tokio::test]
-async fn ordinary_service_has_explicit_readiness_and_shared_final_result() {
-    let (entered, entry) = oneshot::channel();
-    let (release, initialize) = oneshot::channel();
-    let app = Application::builder()
-        .service(
-            ServiceSpec::new("ordinary"),
-            service_fn(move |context: ServiceContext| async move {
-                entered.send(()).unwrap();
-                initialize.await?;
-                announce(&context)?;
-                context.stopping().await;
-                Ok::<(), BoxError>(())
-            }),
-        )
+async fn stop_wakes_driver_even_when_scope_waiter_is_older() {
+    let (send, receive) = oneshot::channel();
+    let app = App::builder()
+        .service_fn("service", move |context| async move {
+            context.ready();
+            send.send(context.clone()).unwrap();
+            context.stopping().await;
+            Ok(())
+        })
         .build()
+        .unwrap()
+        .start()
         .unwrap();
-    let control = app.start().unwrap();
-    let observer = control.observer();
-    bounded(entry).await.unwrap();
-    assert!(!observer.snapshot().ready);
-    release.send(()).unwrap();
-    assert!(bounded(observer.ready(LIMIT)).await.unwrap().ready);
-    control.stop();
-    assert!(!observer.snapshot().ready);
-    let first = bounded(observer.wait()).await.unwrap();
-    let second = bounded(observer.wait()).await.unwrap();
-    assert!(Arc::ptr_eq(&first, &second));
-    assert!(first.is_drained());
-    assert!(first.is_success());
-    assert!(matches!(
-        bounded(control.shutdown()).await.unwrap().as_ref(),
-        ShutdownReport::Completed(_)
-    ));
-}
-
-#[tokio::test]
-async fn stopping_before_between_and_after_initialization_notifications_is_not_failure() {
-    for stage in 0..=2 {
-        let (entered, entry) = oneshot::channel();
-        let (release, initialize) = oneshot::channel();
-        let app = Application::builder()
-            .service(
-                ServiceSpec::new("initializing"),
-                service_fn(move |context: ServiceContext| async move {
-                    if stage >= 1 {
-                        context.set_health(Health::Healthy)?;
-                    }
-                    if stage == 2 {
-                        context.ready()?;
-                    }
-                    entered.send(()).unwrap();
-                    initialize.await?;
-                    context.stopping().await;
-                    assert!(context.set_health(Health::Healthy).is_err());
-                    assert!(context.ready().is_err());
-                    announce(&context)?;
-                    Ok::<(), BoxError>(())
-                }),
-            )
-            .build()
-            .unwrap();
-        let control = app.start().unwrap();
-        let observer = control.observer();
-        bounded(entry).await.unwrap();
-        if stage == 2 {
-            bounded(observer.ready(LIMIT)).await.unwrap();
-        }
-        control.stop();
-        release.send(()).unwrap();
-        assert!(matches!(
-            bounded(observer.ready(LIMIT)).await,
-            Err(ReadyError::StoppedBeforeReady)
-        ));
-        let report = bounded(observer.wait()).await.unwrap();
-        assert!(
-            report.is_success(),
-            "normal stop at notification stage {stage}: {report:?}"
-        );
-        assert!(!observer.snapshot().ready);
-        assert!(
-            report
-                .services
-                .iter()
-                .all(|service| service.failure.is_none())
-        );
-        assert!(matches!(
-            report.services[0].outcome,
-            Some(RootOutcome::Succeeded)
-        ));
-    }
-}
-
-#[tokio::test]
-async fn real_initialization_error_after_stop_is_preserved() {
-    let (entered, entry) = oneshot::channel();
-    let app = Application::builder()
-        .service(
-            ServiceSpec::new("failing"),
-            service_fn(move |context: ServiceContext| async move {
-                entered.send(()).unwrap();
-                context.stopping().await;
-                announce(&context)?;
-                Err::<(), BoxError>(std::io::Error::other("real initialization failure").into())
-            }),
-        )
-        .build()
-        .unwrap();
-    let control = app.start().unwrap();
-    let observer = control.observer();
-    bounded(entry).await.unwrap();
-    control.stop();
-    let report = bounded(observer.wait()).await.unwrap();
-    assert!(!report.is_success());
-    assert!(
-        matches!(&report.services[0].outcome, Some(RootOutcome::Failed(error))
-        if error.to_string() == "real initialization failure")
-    );
-    assert!(report.services[0].failure.is_some());
-}
-
-#[tokio::test]
-async fn health_changes_do_not_restart_or_reinitialize_service() {
-    let (send_context, receive_context) = oneshot::channel();
-    let app = Application::builder()
-        .service(
-            ServiceSpec::new("health"),
-            service_fn(move |context: ServiceContext| async move {
-                context.ready()?;
-                send_context.send(context.clone()).unwrap();
-                context.stopping().await;
-                Ok::<(), BoxError>(())
-            }),
-        )
-        .build()
-        .unwrap();
-    let control = app.start().unwrap();
-    let observer = control.observer();
-    let context = bounded(receive_context).await.unwrap();
-    wait_health(&observer, Health::Unknown, false).await;
-    context.set_health(Health::Healthy).unwrap();
-    wait_health(&observer, Health::Healthy, true).await;
-    context.set_health(Health::Degraded).unwrap();
-    wait_health(&observer, Health::Degraded, false).await;
-    context.ready().unwrap();
-    assert!(!observer.snapshot().ready);
-    context.set_health(Health::Healthy).unwrap();
-    wait_health(&observer, Health::Healthy, true).await;
-    control.stop();
-    assert!(bounded(observer.wait()).await.unwrap().is_success());
-}
-
-#[tokio::test]
-async fn finite_provider_waits_for_its_child_before_unlocking_consumer() {
-    let (provider_entered, provider_entry) = oneshot::channel();
-    let (release, child_release) = oneshot::channel();
-    let (consumer_entered, mut consumer_entry) = oneshot::channel();
-    let app = Application::builder()
-        .service(
-            ServiceSpec::new("init").lifetime(Lifetime::Finite),
-            service_fn(move |context: ServiceContext| async move {
-                context.work().spawn(
-                    WorkSpec::new("initialization-child"),
-                    move |_| async move {
-                        child_release.await?;
-                        Ok::<(), BoxError>(())
-                    },
-                )?;
-                context.ready()?;
-                provider_entered.send(()).unwrap();
-                Ok::<(), BoxError>(())
-            }),
-        )
-        .service(
-            ServiceSpec::new("consumer").depends_on("init"),
-            service_fn(move |context: ServiceContext| async move {
-                consumer_entered.send(()).unwrap();
-                announce(&context)?;
-                context.stopping().await;
-                Ok::<(), BoxError>(())
-            }),
-        )
-        .build()
-        .unwrap();
-    let control = app.start().unwrap();
-    bounded(provider_entry).await.unwrap();
-    assert!(matches!(
-        consumer_entry.try_recv(),
-        Err(oneshot::error::TryRecvError::Empty)
-    ));
-    release.send(()).unwrap();
-    bounded(consumer_entry).await.unwrap();
-    bounded(control.observer().ready(LIMIT)).await.unwrap();
-    assert!(matches!(
-        bounded(control.shutdown()).await.unwrap().as_ref(),
-        ShutdownReport::Completed(report) if report.is_success()
-    ));
-}
-
-#[tokio::test]
-async fn provider_stop_waits_for_consumer_root_and_child() {
-    let (provider_stopped, mut provider_stop) = oneshot::channel();
-    let (child_started, child_start) = oneshot::channel();
-    let (child_stopped, child_stop) = oneshot::channel();
-    let (release, child_release) = oneshot::channel();
-    let app = Application::builder()
-        .service(
-            ServiceSpec::new("provider"),
-            service_fn(move |context: ServiceContext| async move {
-                announce(&context)?;
-                context.stopping().await;
-                provider_stopped.send(()).unwrap();
-                Ok::<(), BoxError>(())
-            }),
-        )
-        .service(
-            ServiceSpec::new("consumer").depends_on("provider"),
-            service_fn(move |context: ServiceContext| async move {
-                context
-                    .work()
-                    .spawn(WorkSpec::new("child"), move |work| async move {
-                        child_started.send(()).unwrap();
-                        work.stopping().await;
-                        child_stopped.send(()).unwrap();
-                        child_release.await?;
-                        Ok::<(), BoxError>(())
-                    })?;
-                announce(&context)?;
-                context.stopping().await;
-                Ok::<(), BoxError>(())
-            }),
-        )
-        .build()
-        .unwrap();
-    let control = app.start().unwrap();
-    bounded(child_start).await.unwrap();
-    bounded(control.observer().ready(LIMIT)).await.unwrap();
-    control.stop();
-    bounded(child_stop).await.unwrap();
-    assert!(matches!(
-        provider_stop.try_recv(),
-        Err(oneshot::error::TryRecvError::Empty)
-    ));
-    release.send(()).unwrap();
-    bounded(provider_stop).await.unwrap();
-    assert!(
-        bounded(control.observer().wait())
-            .await
-            .unwrap()
-            .is_success()
-    );
-}
-
-#[tokio::test]
-async fn cleanup_is_lifo_and_errors_do_not_skip_later_actions() {
-    let order = Arc::new(Mutex::new(Vec::new()));
-    let owned_order = order.clone();
-    let app = Application::builder()
-        .service(
-            ServiceSpec::new("resource"),
-            service_fn(move |context: ServiceContext| async move {
-                for index in 0..3 {
-                    let order = owned_order.clone();
-                    context
-                        .defer_cleanup(format!("cleanup-{index}"), move || async move {
-                            order.lock().unwrap().push(index);
-                            if index == 1 {
-                                Err::<(), BoxError>(std::io::Error::other("flush failed").into())
-                            } else {
-                                Ok(())
-                            }
-                        })
-                        .unwrap_or_else(|_| panic!("initialization cleanup registration rejected"));
-                }
-                announce(&context)?;
-                context.stopping().await;
-                Ok::<(), BoxError>(())
-            }),
-        )
-        .build()
-        .unwrap();
-    let control = app.start().unwrap();
-    bounded(control.observer().ready(LIMIT)).await.unwrap();
-    control.stop();
-    let report = bounded(control.observer().wait()).await.unwrap();
-    assert_eq!(*order.lock().unwrap(), [2, 1, 0]);
-    assert!(report.is_drained());
-    assert!(!report.is_success());
-    assert_eq!(
-        report
-            .cleanup
-            .iter()
-            .map(|item| item.label.as_str())
-            .collect::<Vec<_>>(),
-        ["cleanup-2", "cleanup-1", "cleanup-0"]
-    );
-    assert!(report.cleanup[0].error.is_none());
-    assert_eq!(
-        report.cleanup[1].error.as_ref().unwrap().to_string(),
-        "flush failed"
-    );
-    assert!(report.cleanup[2].error.is_none());
-}
-
-#[tokio::test]
-async fn partial_initialization_failure_still_runs_owned_cleanup() {
-    let (cleanup_started, cleanup_start) = oneshot::channel();
-    let (release, cleanup_release) = oneshot::channel();
-    let app = Application::builder()
-        .service(
-            ServiceSpec::new("partial"),
-            service_fn(move |context: ServiceContext| async move {
-                context
-                    .defer_cleanup("partial-resource", move || async move {
-                        cleanup_started.send(()).unwrap();
-                        cleanup_release.await?;
-                        Ok::<(), BoxError>(())
-                    })
-                    .unwrap_or_else(|_| panic!("cleanup registration rejected"));
-                Err::<(), BoxError>(std::io::Error::other("second acquisition failed").into())
-            }),
-        )
-        .build()
-        .unwrap();
-    let control = app.start().unwrap();
-    let observer = control.observer();
-    bounded(cleanup_start).await.unwrap();
-    assert!(bounded(observer.ready(LIMIT)).await.is_err());
-    assert!(matches!(
-        observer.drain(Duration::ZERO).await,
-        DrainObservation::Pending(_)
-    ));
-    release.send(()).unwrap();
-    let report = bounded(observer.wait()).await.unwrap();
-    assert!(!report.is_success());
-    assert!(
-        matches!(&report.services[0].outcome, Some(RootOutcome::Failed(error))
-        if error.to_string() == "second acquisition failed")
-    );
-}
-
-#[tokio::test]
-async fn rejected_cleanup_returns_the_original_action() {
-    let (send_context, receive_context) = oneshot::channel();
-    let (executed, execution) = oneshot::channel();
-    let app = Application::builder()
-        .service(
-            ServiceSpec::new("complete").lifetime(Lifetime::Finite),
-            service_fn(move |context: ServiceContext| async move {
-                send_context.send(context).unwrap();
-                Ok::<(), BoxError>(())
-            }),
-        )
-        .build()
-        .unwrap();
-    let control = app.start().unwrap();
-    let context = bounded(receive_context).await.unwrap();
-    bounded(control.observer().wait()).await.unwrap();
-    let result = context.defer_cleanup("too-late", move || async move {
-        executed.send(()).unwrap();
-        Ok::<(), BoxError>(())
+    let context = receive.await.unwrap();
+    app.ready(Duration::from_secs(1)).await.unwrap();
+    let scope = context.work().clone();
+    let waiter = tokio::spawn(async move {
+        scope.wait().await;
     });
-    let rejected = match result {
-        Ok(_) => panic!("a finished root accepted cleanup"),
-        Err(rejected) => rejected,
-    };
-    bounded(rejected.into_cleanup()()).await.unwrap();
-    bounded(execution).await.unwrap();
-    assert!(context.ready().is_err());
-    assert!(context.set_health(Health::Healthy).is_err());
+    tokio::task::yield_now().await;
+    let mut updates = app.observer().subscribe();
+    context.set_health(Health::Healthy);
+    updates.changed().await.unwrap();
+    let result = tokio::time::timeout(Duration::from_millis(150), app.shutdown()).await;
+    assert!(
+        result.is_ok(),
+        "stop notification was consumed by scope.wait instead of lifecycle driver"
+    );
+    assert!(result.unwrap().unwrap().is_success());
+    waiter.await.unwrap();
 }
 
 #[tokio::test]
-async fn optional_failure_does_not_stop_required_service() {
-    let (optional_failed, optional_failure) = oneshot::channel();
-    let (required_stopped, mut required_stop) = oneshot::channel();
-    let app = Application::builder()
-        .service(
-            ServiceSpec::new("required"),
-            service_fn(move |context: ServiceContext| async move {
-                announce(&context)?;
-                context.stopping().await;
-                required_stopped.send(()).unwrap();
-                Ok::<(), BoxError>(())
-            }),
-        )
-        .service(
-            ServiceSpec::new("optional").criticality(Criticality::Optional),
-            service_fn(move |_context: ServiceContext| async move {
-                optional_failed.send(()).unwrap();
-                Err::<(), BoxError>(std::io::Error::other("optional unavailable").into())
-            }),
-        )
+async fn readiness_wakes_driver_even_when_scope_waiter_is_older() {
+    let (send, receive) = oneshot::channel();
+    let app = App::builder()
+        .service_fn("service", move |context| async move {
+            send.send(context.clone()).unwrap();
+            context.stopping().await;
+            Ok(())
+        })
         .build()
+        .unwrap()
+        .start()
         .unwrap();
-    let control = app.start().unwrap();
-    let observer = control.observer();
-    bounded(optional_failure).await.unwrap();
-    wait_health(&observer, Health::Degraded, true).await;
-    assert!(matches!(
-        required_stop.try_recv(),
-        Err(oneshot::error::TryRecvError::Empty)
-    ));
-    control.stop();
-    bounded(required_stop).await.unwrap();
-    let report = bounded(observer.wait()).await.unwrap();
-    assert!(report.is_success());
-    let optional = report
-        .services
-        .iter()
-        .find(|service| service.id.as_str() == "optional")
-        .unwrap();
-    assert!(matches!(&optional.outcome, Some(RootOutcome::Failed(error))
-        if error.to_string() == "optional unavailable"));
-    assert!(optional.failure.is_some());
-}
-
-#[tokio::test]
-async fn cancelled_waiter_and_last_control_drop_keep_cleanup_owned() {
-    let (cleanup_started, cleanup_start) = oneshot::channel();
-    let (release, cleanup_release) = oneshot::channel();
-    let app = Application::builder()
-        .service(
-            ServiceSpec::new("resident"),
-            service_fn(move |context: ServiceContext| async move {
-                context
-                    .defer_cleanup("held", move || async move {
-                        cleanup_started.send(()).unwrap();
-                        cleanup_release.await?;
-                        Ok::<(), BoxError>(())
-                    })
-                    .unwrap_or_else(|_| panic!("cleanup rejected"));
-                announce(&context)?;
-                context.stopping().await;
-                Ok::<(), BoxError>(())
-            }),
-        )
-        .build()
-        .unwrap();
-    let control = app.start().unwrap();
-    let observer = control.observer();
-    bounded(observer.ready(LIMIT)).await.unwrap();
-    let waiter_observer = observer.clone();
-    let waiter = tokio::spawn(async move { waiter_observer.wait().await });
-    waiter.abort();
-    assert!(bounded(waiter).await.unwrap_err().is_cancelled());
-    drop(control);
-    bounded(cleanup_start).await.unwrap();
-    assert!(matches!(
-        observer.drain(Duration::ZERO).await,
-        DrainObservation::Pending(_)
-    ));
-    release.send(()).unwrap();
-    assert!(bounded(observer.wait()).await.unwrap().is_success());
+    let context = receive.await.unwrap();
+    let scope = context.work().clone();
+    let waiter = tokio::spawn(async move {
+        scope.wait().await;
+    });
+    tokio::task::yield_now().await;
+    let mut updates = app.observer().subscribe();
+    context.set_health(Health::Healthy);
+    updates.changed().await.unwrap();
+    context.ready();
+    let result = app.ready(Duration::from_millis(150)).await;
+    assert!(
+        result.is_ok(),
+        "readiness notification was consumed by scope.wait instead of lifecycle driver"
+    );
+    app.shutdown().await.unwrap();
+    waiter.await.unwrap();
 }
 
 #[tokio::test(start_paused = true)]
-async fn budget_history_stays_incomplete_after_cleanup_later_finishes() {
-    let (cleanup_started, cleanup_start) = oneshot::channel();
-    let (release, cleanup_release) = oneshot::channel();
-    let app = Application::builder()
-        .options(AppOptions {
-            startup_timeout: Duration::from_secs(30),
-            shutdown_grace: Duration::from_secs(2),
-            abort_wait: Duration::from_secs(1),
-            recent_results: 8,
-        })
-        .service(
-            ServiceSpec::new("cleanup"),
-            service_fn(move |context: ServiceContext| async move {
+async fn live_global_and_optional_budget_flags_keep_pending_responsibility() {
+    let release = Arc::new(Notify::new());
+    let complete = release.clone();
+    let (send, receive) = oneshot::channel();
+    let app = App::builder()
+        .options(short_options())
+        .service_fn("required", resident)
+        .service_fn(
+            ServiceSpec::new("optional").criticality(Criticality::Optional),
+            move |context| async move {
+                let (started, running) = oneshot::channel();
                 context
-                    .defer_cleanup("held", move || async move {
-                        cleanup_started.send(()).unwrap();
-                        cleanup_release.await?;
+                    .work()
+                    .spawn(WorkSpec::aggregate("external"), move |_| async move {
+                        started.send(()).unwrap();
+                        complete.notified().await;
                         Ok::<(), BoxError>(())
-                    })
-                    .unwrap_or_else(|_| panic!("cleanup rejected"));
-                announce(&context)?;
-                context.stopping().await;
-                Ok::<(), BoxError>(())
-            }),
+                    })?;
+                running.await.unwrap();
+                send.send(()).unwrap();
+                Err(io::Error::other("optional-fault").into())
+            },
         )
         .build()
+        .unwrap()
+        .start()
         .unwrap();
-    let control = app.start().unwrap();
-    let observer = control.observer();
-    observer.ready(LIMIT).await.unwrap();
-    control.stop();
-    cleanup_start.await.unwrap();
-    tokio::time::advance(Duration::from_secs(3)).await;
-    let first = control.shutdown().await.unwrap();
-    assert!(matches!(first.as_ref(), ShutdownReport::Incomplete(_)));
+    receive.await.unwrap();
+    app.ready(Duration::from_secs(1)).await.unwrap();
+    tokio::time::advance(Duration::from_millis(60)).await;
+    let mut updates = app.observer().subscribe();
+    while !updates.current().services[1].stop_budget_exceeded {
+        updates.changed().await.unwrap();
+    }
+    assert!(app.snapshot().ready);
     assert!(matches!(
-        observer.drain(Duration::ZERO).await,
-        DrainObservation::Pending(_)
+        app.shutdown_within(Duration::from_millis(100))
+            .await
+            .unwrap(),
+        ShutdownProgress::Pending(_)
     ));
-    release.send(()).unwrap();
-    let report = bounded(observer.wait()).await.unwrap();
+    assert!(
+        app.snapshot().budget_exceeded,
+        "live global budget flag was not published"
+    );
+    assert!(app.snapshot().services[1].stop_budget_exceeded);
+    release.notify_one();
+    let report = app.shutdown().await.unwrap();
     assert!(report.is_success());
-    let second = control.shutdown().await.unwrap();
-    assert!(Arc::ptr_eq(&first, &second));
-    assert!(matches!(second.as_ref(), ShutdownReport::Incomplete(_)));
+    assert!(report.snapshot.budget_exceeded);
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn applications_sharing_runtime_stop_independently() {
-    let mut controls = Vec::new();
-    for _ in 0..2 {
-        let app = Application::builder()
-            .service(
-                ServiceSpec::new("same-name"),
-                service_fn(|context: ServiceContext| async move {
-                    announce(&context)?;
-                    context.stopping().await;
-                    Ok::<(), BoxError>(())
-                }),
+#[tokio::test]
+async fn readiness_is_health_sensitive_and_default_health_is_healthy() {
+    for explicit in [
+        None,
+        Some(Health::Unknown),
+        Some(Health::Degraded),
+        Some(Health::Unhealthy),
+    ] {
+        let (send, receive) = oneshot::channel();
+        let app = App::builder()
+            .service_fn("service", move |context| async move {
+                if let Some(health) = explicit {
+                    context.set_health(health);
+                }
+                context.ready();
+                context.ready();
+                send.send(context.clone()).unwrap();
+                context.stopping().await;
+                // Late notifications cannot revive readiness or change saved health.
+                context.set_health(Health::Unhealthy);
+                context.ready();
+                Ok(())
+            })
+            .build()
+            .unwrap()
+            .start()
+            .unwrap();
+        let context = receive.await.unwrap();
+        if let Some(explicit) = explicit {
+            assert!(matches!(
+                app.ready(Duration::from_millis(5)).await,
+                Err(ReadyError::Timeout(_))
+            ));
+            assert_eq!(app.snapshot().phase, Phase::Running);
+            assert_eq!(app.snapshot().services[0].health, explicit);
+        } else {
+            assert!(app.ready(Duration::from_secs(1)).await.unwrap().ready);
+        }
+        context.set_health(Health::Healthy);
+        assert!(app.ready(Duration::from_secs(1)).await.unwrap().ready);
+        app.stop();
+        assert!(!app.snapshot().ready);
+        let report = app.shutdown().await.unwrap();
+        assert!(report.is_success());
+        assert_eq!(report.snapshot.services[0].health, Health::Healthy);
+    }
+}
+
+#[tokio::test]
+async fn failure_and_natural_completion_do_not_wait_for_host_signal() {
+    let report = App::builder()
+        .service_fn(finite("step"), |_| async { Ok(()) })
+        .build()
+        .unwrap()
+        .run_until(pending::<Result<(), io::Error>>())
+        .await
+        .unwrap();
+    assert!(report.is_success());
+    for after_ready in [false, true] {
+        let error = App::builder()
+            .service_fn("fault", move |context| async move {
+                if after_ready {
+                    context.ready();
+                }
+                Err(io::Error::other("original-service-error").into())
+            })
+            .build()
+            .unwrap()
+            .run_until(pending::<Result<(), io::Error>>())
+            .await
+            .unwrap_err();
+        let report = error.report().unwrap();
+        assert!(!report.is_success());
+        assert!(
+            matches!(&report.snapshot.services[0].failures[0], ServiceFailure::Error(e) if e.to_string()=="original-service-error")
+        );
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn finite_work_may_exceed_resident_startup_timeout() {
+    let handle = App::builder()
+        .options(AppOptions {
+            startup_timeout: Duration::from_secs(30),
+            ..AppOptions::default()
+        })
+        .service_fn(finite("migration"), |context| async move {
+            context.ready();
+            tokio::time::sleep(Duration::from_secs(45)).await;
+            Ok(())
+        })
+        .service_fn("resident", resident)
+        .build()
+        .unwrap()
+        .start()
+        .unwrap();
+
+    tokio::task::yield_now().await;
+    tokio::time::advance(Duration::from_secs(31)).await;
+    tokio::task::yield_now().await;
+    let snapshot = handle.snapshot();
+    assert!(
+        !snapshot.ready,
+        "finite completion has not opened its dependency gate"
+    );
+    assert!(
+        !snapshot.services[0]
+            .failures
+            .iter()
+            .any(|failure| matches!(failure, ServiceFailure::StartupTimeout)),
+        "Finite work was subjected to the Resident startup_timeout"
+    );
+    assert_eq!(snapshot.services[0].phase, ServicePhase::Starting);
+
+    tokio::time::advance(Duration::from_secs(14)).await;
+    for _ in 0..4 {
+        tokio::task::yield_now().await;
+    }
+    let ready = handle.snapshot();
+    assert!(ready.ready);
+    assert_eq!(ready.services[0].phase, ServicePhase::Completed);
+    assert_eq!(ready.services[0].health, Health::Healthy);
+    assert!(handle.shutdown().await.unwrap().is_success());
+}
+
+#[tokio::test]
+async fn stop_source_error_retains_report_and_business_failure() {
+    let (send, receive) = oneshot::channel();
+    let app = App::builder()
+        .service_fn("service", move |context| async move {
+            context.ready();
+            let _ = send.send(());
+            context.stopping().await;
+            Err(io::Error::other("close-service-error").into())
+        })
+        .build()
+        .unwrap();
+    let error = app
+        .run_until(async {
+            receive.await.unwrap();
+            Err::<(), _>(io::Error::other("signal-error"))
+        })
+        .await
+        .unwrap_err();
+    let RunError::StopSource { source, report } = error else {
+        panic!("lost host error")
+    };
+    assert_eq!(source.to_string(), "signal-error");
+    assert!(!report.is_success());
+    assert!(
+        matches!(&report.snapshot.services[0].failures[0], ServiceFailure::Error(e) if e.to_string()=="close-service-error")
+    );
+}
+
+#[tokio::test]
+async fn resident_early_ok_and_panic_are_faults_but_optional_fault_is_nonfatal() {
+    for panic in [false, true] {
+        let result = App::builder()
+            .service_fn("early", move |_| async move {
+                assert!(!panic, "root-panic");
+                Ok(())
+            })
+            .build()
+            .unwrap()
+            .run_until(pending::<Result<(), io::Error>>())
+            .await;
+        assert!(matches!(result, Err(RunError::Failed { .. })));
+    }
+    let app = App::builder()
+        .service_fn("required", resident)
+        .service_fn(
+            ServiceSpec::new("optional").criticality(Criticality::Optional),
+            |_| async { Err(io::Error::other("optional-error").into()) },
+        )
+        .build()
+        .unwrap()
+        .start()
+        .unwrap();
+    let mut changes = app.observer().subscribe();
+    loop {
+        let current = changes.current();
+        if current.ready && current.health == Health::Degraded {
+            break;
+        }
+        changes.changed().await.unwrap();
+    }
+    assert!(app.shutdown().await.unwrap().is_success());
+}
+
+#[tokio::test(start_paused = true)]
+async fn startup_timeout_stops_and_freezes_dependents() {
+    let called = Arc::new(AtomicBool::new(false));
+    let seen = called.clone();
+    let app = App::builder()
+        .options(short_options())
+        .service_fn("provider", |context| async move {
+            context.stopping().await;
+            context.ready();
+            Ok(())
+        })
+        .service_fn(
+            ServiceSpec::new("consumer").depends_on("provider"),
+            move |_| async move {
+                seen.store(true, Ordering::SeqCst);
+                Ok(())
+            },
+        )
+        .build()
+        .unwrap()
+        .start()
+        .unwrap();
+    let report = app.wait().await.unwrap();
+    assert!(!called.load(Ordering::SeqCst));
+    assert!(matches!(
+        report.snapshot.services[0].failures[0],
+        ServiceFailure::StartupTimeout
+    ));
+    assert_eq!(report.snapshot.services[1].phase, ServicePhase::NotStarted);
+    assert!(!report.snapshot.services[0].initialized);
+}
+
+#[tokio::test]
+async fn finite_record_error_and_old_health_do_not_block_dependency() {
+    for old_health in [Health::Unknown, Health::Degraded, Health::Unhealthy] {
+        let app = App::builder()
+            .service_fn(finite("initialize"), move |context| async move {
+                context.set_health(old_health);
+                context
+                    .work()
+                    .spawn(WorkSpec::new("record-only"), |_| async {
+                        Err::<(), _>(io::Error::other("record-error"))
+                    })?;
+                Ok(())
+            })
+            .service_fn(
+                ServiceSpec::new("consumer").depends_on("initialize"),
+                resident,
             )
             .build()
+            .unwrap()
+            .start()
             .unwrap();
-        let control = app.start().unwrap();
-        bounded(control.observer().ready(LIMIT)).await.unwrap();
-        controls.push(control);
+        let ready = app.ready(Duration::from_secs(1)).await.unwrap();
+        assert_eq!(ready.health, Health::Healthy);
+        assert!(ready.services[0].initialized);
+        assert!(app.shutdown().await.unwrap().is_success());
     }
-    controls[0].stop();
-    assert!(
-        bounded(controls[0].observer().wait())
+}
+
+#[tokio::test]
+async fn finite_fail_service_error_never_unlocks_consumer_or_final_success() {
+    for consumer in [false, true] {
+        let entered = Arc::new(AtomicBool::new(false));
+        let marker = entered.clone();
+        let mut builder = App::builder().service_fn(finite("initialize"), |context| async move {
+            context
+                .work()
+                .spawn(WorkSpec::new("fault").fail_service(), |_| async {
+                    tokio::task::yield_now().await;
+                    Err::<(), _>(io::Error::other("owner-fault"))
+                })?;
+            Ok(())
+        });
+        if consumer {
+            builder = builder.service_fn(
+                ServiceSpec::new("consumer").depends_on("initialize"),
+                move |context| async move {
+                    marker.store(true, Ordering::SeqCst);
+                    resident(context).await
+                },
+            );
+        }
+        let report = builder
+            .build()
+            .unwrap()
+            .start()
+            .unwrap()
+            .wait()
             .await
+            .unwrap();
+        assert!(!entered.load(Ordering::SeqCst));
+        assert!(!report.is_success());
+        assert!(!report.snapshot.services[0].initialized);
+        assert!(
+            report.snapshot.services[0]
+                .failures
+                .iter()
+                .any(|f| matches!(f, ServiceFailure::Work(_)))
+        );
+    }
+}
+
+#[tokio::test]
+async fn provider_waits_for_consumer_root_and_child_then_cleanup_lifo() {
+    let events = Arc::new(Mutex::new(Vec::new()));
+    let provider_events = events.clone();
+    let child_events = events.clone();
+    let cleanup_a = events.clone();
+    let cleanup_b = events.clone();
+    let (send, receive) = oneshot::channel();
+    let child_release = Arc::new(Notify::new());
+    let release = child_release.clone();
+    let app = App::builder()
+        .cleanup("first", move || async move {
+            cleanup_a.lock().unwrap().push("cleanup-first");
+            Ok(())
+        })
+        .cleanup("second", move || async move {
+            cleanup_b.lock().unwrap().push("cleanup-second");
+            Ok(())
+        })
+        .service_fn("provider", move |context| async move {
+            context.ready();
+            context.stopping().await;
+            provider_events.lock().unwrap().push("provider-stop");
+            Ok(())
+        })
+        .service_fn(
+            ServiceSpec::new("consumer").depends_on("provider"),
+            move |context| async move {
+                context
+                    .work()
+                    .spawn(WorkSpec::new("child"), move |work| async move {
+                        work.stopping().await;
+                        release.notified().await;
+                        child_events.lock().unwrap().push("child-release");
+                        Ok::<(), BoxError>(())
+                    })?;
+                context.ready();
+                let _ = send.send(());
+                context.stopping().await;
+                Ok(())
+            },
+        )
+        .build()
+        .unwrap()
+        .start()
+        .unwrap();
+    receive.await.unwrap();
+    app.stop();
+    assert!(matches!(
+        app.shutdown_within(Duration::from_millis(5)).await.unwrap(),
+        ShutdownProgress::Pending(_)
+    ));
+    assert!(
+        events.lock().unwrap().is_empty(),
+        "provider stopped before consumer child released"
+    );
+    child_release.notify_one();
+    app.shutdown().await.unwrap();
+    assert_eq!(
+        *events.lock().unwrap(),
+        [
+            "child-release",
+            "provider-stop",
+            "cleanup-second",
+            "cleanup-first"
+        ]
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn hanging_cleanup_retains_lifo_and_historical_budget() {
+    let done = Arc::new(AtomicBool::new(false));
+    let done_close = done.clone();
+    let release = Arc::new(Notify::new());
+    let release_close = release.clone();
+    let app = App::builder()
+        .options(short_options())
+        .cleanup("later", move || async move {
+            done_close.store(true, Ordering::SeqCst);
+            Ok(())
+        })
+        .cleanup("hanging", move || async move {
+            release_close.notified().await;
+            Ok(())
+        })
+        .service_fn("service", resident)
+        .build()
+        .unwrap()
+        .start()
+        .unwrap();
+    app.ready(Duration::from_secs(1)).await.unwrap();
+    let observed = app
+        .shutdown_within(Duration::from_millis(100))
+        .await
+        .unwrap();
+    let ShutdownProgress::Pending(snapshot) = observed else {
+        panic!("cleanup falsely completed")
+    };
+    assert!(
+        snapshot.budget_exceeded,
+        "stop budget overrun was not published"
+    );
+    assert!(!done.load(Ordering::SeqCst));
+    assert_eq!(snapshot.current_cleanup.as_deref(), Some("hanging"));
+    assert_eq!(snapshot.pending_cleanup, ["later"]);
+    // A late stop must not renew or erase the historical deadline.
+    app.stop();
+    release.notify_one();
+    let report = app.shutdown().await.unwrap();
+    assert!(report.snapshot.budget_exceeded);
+    assert!(done.load(Ordering::SeqCst));
+}
+
+#[tokio::test]
+async fn single_root_keeps_child_and_cleanup_after_root_return() {
+    let release = Arc::new(Notify::new());
+    let child = release.clone();
+    let closed = Arc::new(AtomicBool::new(false));
+    let close = closed.clone();
+    let (send, receive) = oneshot::channel();
+    let app = App::builder()
+        .cleanup("resource", move || async move {
+            close.store(true, Ordering::SeqCst);
+            Ok(())
+        })
+        .service_fn(finite("initialize"), move |context| async move {
+            context
+                .work()
+                .spawn(WorkSpec::new("child"), move |_| async move {
+                    send.send(()).unwrap();
+                    child.notified().await;
+                    Ok::<(), BoxError>(())
+                })?;
+            Ok(())
+        })
+        .build()
+        .unwrap()
+        .start()
+        .unwrap();
+    receive.await.unwrap();
+    let result = app
+        .observer()
+        .drain(Duration::from_millis(5))
+        .await
+        .unwrap();
+    assert!(
+        matches!(result, ShutdownProgress::Pending(_)),
+        "root return bypassed actual child release"
+    );
+    assert!(!closed.load(Ordering::SeqCst));
+    release.notify_one();
+    assert!(app.wait().await.unwrap().is_success());
+    assert!(closed.load(Ordering::SeqCst));
+}
+
+#[tokio::test]
+async fn initialization_cleanup_accepts_interrupted_init_and_rejects_after_ready() {
+    let closed = Arc::new(AtomicBool::new(false));
+    let close = closed.clone();
+    let (send, receive) = oneshot::channel();
+    let app = App::builder()
+        .service_fn("service", move |context| async move {
+            send.send(()).unwrap();
+            context.stopping().await;
+            context
+                .defer_cleanup("acquired", move || async move {
+                    close.store(true, Ordering::SeqCst);
+                    Ok::<(), BoxError>(())
+                })
+                .unwrap();
+            Ok(())
+        })
+        .build()
+        .unwrap()
+        .start()
+        .unwrap();
+    receive.await.unwrap();
+    app.shutdown().await.unwrap();
+    assert!(closed.load(Ordering::SeqCst));
+    let (send, receive) = oneshot::channel();
+    let app = App::builder()
+        .service_fn("service", move |context| async move {
+            context.ready();
+            let rejected = context
+                .defer_cleanup("late", || async { Ok::<(), BoxError>(()) })
+                .unwrap_err();
+            (rejected.into_inner())().await?;
+            send.send(()).unwrap();
+            context.stopping().await;
+            Ok(())
+        })
+        .build()
+        .unwrap()
+        .start()
+        .unwrap();
+    receive.await.unwrap();
+    assert!(app.shutdown().await.unwrap().is_success());
+}
+
+#[tokio::test]
+async fn cleanup_failure_and_panic_keep_later_actions_and_original_errors() {
+    let last = Arc::new(AtomicBool::new(false));
+    let close = last.clone();
+    let result = App::builder()
+        .cleanup("last", move || async move {
+            close.store(true, Ordering::SeqCst);
+            Ok(())
+        })
+        .cleanup("panic", || async { panic!("cleanup-panic") })
+        .cleanup("error", || async {
+            Err(io::Error::other("cleanup-error").into())
+        })
+        .service_fn(finite("step"), |_| async { Ok(()) })
+        .build()
+        .unwrap()
+        .run_until(pending::<Result<(), io::Error>>())
+        .await
+        .unwrap_err();
+    let reports = &result.report().unwrap().snapshot.cleanup;
+    assert_eq!(
+        reports[0].error.as_ref().unwrap().to_string(),
+        "cleanup-error"
+    );
+    assert!(reports[1].panic.as_ref().unwrap().contains("cleanup-panic"));
+    assert!(reports[2].is_success());
+    assert!(last.load(Ordering::SeqCst));
+}
+
+#[tokio::test]
+async fn last_control_drop_and_cancelled_run_until_still_drain() {
+    let app = App::builder()
+        .service_fn("service", resident)
+        .build()
+        .unwrap()
+        .start()
+        .unwrap();
+    app.ready(Duration::from_secs(1)).await.unwrap();
+    let observer = app.observer();
+    let retained = app.clone();
+    drop(app);
+    assert!(!retained.snapshot().services[0].stopping);
+    drop(retained);
+    assert!(
+        tokio::time::timeout(Duration::from_millis(100), observer.wait())
+            .await
+            .expect("control lease drop did not stop owned driver")
             .unwrap()
             .is_success()
     );
-    assert!(controls[1].observer().snapshot().ready);
-    controls[1].stop();
+    let (send, receive) = oneshot::channel();
+    let app = App::builder()
+        .service_fn("service", move |context| async move {
+            context.ready();
+            send.send(context.observer()).unwrap();
+            context.stopping().await;
+            Ok(())
+        })
+        .build()
+        .unwrap();
+    let run = tokio::spawn(app.run_until(pending::<Result<(), io::Error>>()));
+    let observer = receive.await.unwrap();
+    run.abort();
+    let _ = run.await;
     assert!(
-        bounded(controls[1].observer().wait())
+        tokio::time::timeout(Duration::from_millis(100), observer.wait())
             .await
+            .expect("cancelled run_until lost lifecycle ownership")
             .unwrap()
             .is_success()
     );
 }
 
 #[test]
-fn no_runtime_start_returns_the_application_for_retry() {
-    let app = Application::builder()
-        .service(
-            ServiceSpec::new("finite").lifetime(Lifetime::Finite),
-            service_fn(|_: ServiceContext| async { Ok::<(), BoxError>(()) }),
-        )
+fn start_error_is_send_sync_and_recovers_unstarted_app() {
+    fn assert_error<T: std::error::Error + Send + Sync>() {}
+    assert_error::<miju_services::StartError>();
+    let called = Arc::new(AtomicBool::new(false));
+    let mark = called.clone();
+    let app = App::builder()
+        .service_fn(finite("step"), move |_| async move {
+            mark.store(true, Ordering::SeqCst);
+            Ok(())
+        })
         .build()
         .unwrap();
-    let recovered = match app.start() {
-        Ok(_) => panic!("start outside a runtime succeeded"),
-        Err(error) => error.into_application(),
-    };
+    let error: BoxError = app.start().unwrap_err().into();
+    assert!(!called.load(Ordering::SeqCst));
+    let app = error
+        .downcast::<miju_services::StartError>()
+        .unwrap()
+        .into_app();
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_time()
         .build()
         .unwrap();
-    runtime.block_on(async {
-        let control = recovered.start().unwrap();
-        assert!(
-            bounded(control.observer().wait())
-                .await
-                .unwrap()
-                .is_success()
-        );
-    });
-}
-
-#[tokio::test]
-async fn stop_before_first_root_poll_releases_unstarted_captures() {
-    use std::sync::atomic::{AtomicUsize, Ordering};
-
-    struct Capture(Arc<AtomicUsize>);
-
-    impl Drop for Capture {
-        fn drop(&mut self) {
-            self.0.fetch_add(1, Ordering::SeqCst);
-        }
-    }
-
-    let dropped = Arc::new(AtomicUsize::new(0));
-    let entered = Arc::new(AtomicUsize::new(0));
-    let run_entered = entered.clone();
-    let capture = Capture(dropped.clone());
-    let app = Application::builder()
-        .service(
-            ServiceSpec::new("not-started"),
-            service_fn(move |context: ServiceContext| async move {
-                let _capture = capture;
-                run_entered.fetch_add(1, Ordering::SeqCst);
-                announce(&context)?;
-                context.stopping().await;
-                Ok::<(), BoxError>(())
-            }),
-        )
-        .build()
-        .unwrap();
-    let control = app.start().unwrap();
-    control.stop();
-    let report = bounded(control.observer().wait()).await.unwrap();
-    assert_eq!(entered.load(Ordering::SeqCst), 0);
-    assert_eq!(dropped.load(Ordering::SeqCst), 1);
-    assert!(matches!(
-        report.services[0].outcome,
-        Some(RootOutcome::NotStarted)
-    ));
+    let report = runtime.block_on(async { app.start().unwrap().wait().await.unwrap() });
     assert!(report.is_success());
+    assert!(called.load(Ordering::SeqCst));
 }
 
 #[test]
-fn invalid_assembly_is_rejected_before_any_service_runs() {
-    fn never_run() -> impl miju_services::Service<Error = BoxError> {
-        async fn entry(_: ServiceContext) -> Result<(), BoxError> {
-            panic!("build validation must not run service entries");
-        }
-        service_fn(entry)
-    }
+fn runtime_loss_wakes_current_and_future_observers_without_completion_certificate() {
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_time()
+        .build()
+        .unwrap();
+    let handle = runtime.block_on(async {
+        let handle = App::builder()
+            .service_fn("service", resident)
+            .build()
+            .unwrap()
+            .start()
+            .unwrap();
+        handle.ready(Duration::from_secs(1)).await.unwrap();
+        handle
+    });
+    let observer = handle.observer();
+    drop(runtime);
+    let other = tokio::runtime::Builder::new_current_thread()
+        .enable_time()
+        .build()
+        .unwrap();
+    other.block_on(async {
+        assert!(observer.wait().await.unwrap_err().snapshot.driver_lost);
+        assert!(handle.wait().await.is_err());
+        assert!(matches!(
+            handle.shutdown().await,
+            Err(RunError::DriverLost { .. })
+        ));
+    });
+}
 
-    assert!(Application::builder().build().is_err());
-    assert!(
-        Application::builder()
-            .service(ServiceSpec::new(""), never_run())
-            .build()
-            .is_err()
+#[test]
+fn driver_loss_keeps_an_already_observed_stop_source_error() {
+    let app = App::builder()
+        .cleanup("pending-close", pending::<Result<(), BoxError>>)
+        .service_fn("service", resident)
+        .build()
+        .unwrap();
+    let mut running = Box::pin(
+        app.run_until(async { Err::<(), _>(io::Error::other("signal-before-driver-loss")) }),
     );
-    assert!(
-        Application::builder()
-            .service(ServiceSpec::new("duplicate"), never_run())
-            .service(ServiceSpec::new("duplicate"), never_run())
-            .build()
-            .is_err()
-    );
-    assert!(
-        Application::builder()
-            .service(ServiceSpec::new("a").depends_on("missing"), never_run())
-            .build()
-            .is_err()
-    );
-    assert!(
-        Application::builder()
-            .service(
-                ServiceSpec::new("a").depends_on("b").depends_on("b"),
-                never_run()
-            )
-            .service(ServiceSpec::new("b"), never_run())
-            .build()
-            .is_err()
-    );
-    assert!(
-        Application::builder()
-            .service(ServiceSpec::new("a").depends_on("b"), never_run())
-            .service(ServiceSpec::new("b").depends_on("a"), never_run())
-            .build()
-            .is_err()
-    );
-    assert!(
-        Application::builder()
-            .service(ServiceSpec::new("a").depends_on("b"), never_run())
-            .service(
-                ServiceSpec::new("b").criticality(Criticality::Optional),
-                never_run()
-            )
-            .build()
-            .is_err()
-    );
-    for options in [
-        AppOptions {
-            startup_timeout: Duration::ZERO,
-            ..AppOptions::default()
-        },
-        AppOptions {
-            shutdown_grace: Duration::ZERO,
-            ..AppOptions::default()
-        },
-        AppOptions {
-            shutdown_grace: Duration::MAX,
-            abort_wait: Duration::from_secs(1),
-            ..AppOptions::default()
-        },
-    ] {
+    let owner = tokio::runtime::Builder::new_current_thread()
+        .enable_time()
+        .build()
+        .unwrap();
+    owner.block_on(async {
         assert!(
-            Application::builder()
-                .options(options)
-                .service(ServiceSpec::new("valid"), never_run())
-                .build()
+            tokio::time::timeout(Duration::from_millis(5), running.as_mut())
+                .await
                 .is_err()
         );
-    }
-}
-
-#[tokio::test]
-async fn interrupted_initialization_can_still_transfer_cleanup() {
-    let (entered, entry) = oneshot::channel();
-    let (cleaned, cleanup) = oneshot::channel();
-    let app = Application::builder()
-        .service(
-            ServiceSpec::new("interrupted"),
-            service_fn(move |context: ServiceContext| async move {
-                entered.send(()).unwrap();
-                context.stopping().await;
-                context
-                    .defer_cleanup("partially-acquired", move || async move {
-                        cleaned.send(()).unwrap();
-                        Ok::<(), BoxError>(())
-                    })
-                    .unwrap_or_else(|_| {
-                        panic!("stop must not prevent initialization cleanup transfer")
-                    });
-                announce(&context)?;
-                Ok::<(), BoxError>(())
-            }),
-        )
-        .build()
-        .unwrap();
-    let control = app.start().unwrap();
-    bounded(entry).await.unwrap();
-    control.stop();
-    let report = bounded(control.observer().wait()).await.unwrap();
-    bounded(cleanup).await.unwrap();
-    assert!(report.is_success());
-    assert_eq!(report.cleanup.len(), 1);
-    assert_eq!(report.cleanup[0].label, "partially-acquired");
-}
-
-#[tokio::test]
-async fn resident_return_without_stop_is_a_lifecycle_failure() {
-    let app = Application::builder()
-        .service(
-            ServiceSpec::new("unexpected"),
-            service_fn(|context: ServiceContext| async move {
-                announce(&context)?;
-                Ok::<(), BoxError>(())
-            }),
-        )
-        .build()
-        .unwrap();
-    let control = app.start().unwrap();
-    let report = bounded(control.observer().wait()).await.unwrap();
-    assert!(!report.is_success());
-    assert!(matches!(
-        report.services[0].outcome,
-        Some(RootOutcome::Succeeded)
-    ));
-    assert!(report.services[0].failure.is_some());
-}
-
-#[tokio::test]
-async fn initialization_panic_preserves_registered_cleanup() {
-    async fn panic_after_registration(context: ServiceContext) -> Result<(), BoxError> {
-        context
-            .defer_cleanup("owned-before-panic", || async { Ok::<(), BoxError>(()) })
-            .unwrap_or_else(|_| panic!("registration failed"));
-        panic!("initialization panic");
-    }
-
-    let app = Application::builder()
-        .service(
-            ServiceSpec::new("panic"),
-            service_fn(panic_after_registration),
-        )
-        .build()
-        .unwrap();
-    let control = app.start().unwrap();
-    let report = bounded(control.observer().wait()).await.unwrap();
-    assert!(!report.is_success());
-    assert!(
-        matches!(&report.services[0].outcome, Some(RootOutcome::Panicked(message))
-        if message.as_ref() == "initialization panic")
-    );
-    assert_eq!(report.cleanup.len(), 1);
-    assert_eq!(report.cleanup[0].label, "owned-before-panic");
-    assert!(report.cleanup[0].error.is_none());
-}
-
-#[tokio::test(start_paused = true)]
-async fn required_startup_timeout_stops_and_cleans_partial_initialization() {
-    let (entered, entry) = oneshot::channel();
-    let app = Application::builder()
-        .options(AppOptions {
-            startup_timeout: Duration::from_secs(2),
-            ..AppOptions::default()
-        })
-        .service(
-            ServiceSpec::new("timeout"),
-            service_fn(move |context: ServiceContext| async move {
-                context
-                    .defer_cleanup("partial", || async { Ok::<(), BoxError>(()) })
-                    .unwrap();
-                entered.send(()).unwrap();
-                context.stopping().await;
-                announce(&context)?;
-                Ok::<(), BoxError>(())
-            }),
-        )
-        .build()
-        .unwrap();
-    let control = app.start().unwrap();
-    entry.await.unwrap();
-    tokio::time::advance(Duration::from_secs(2)).await;
-    let report = bounded(control.observer().wait()).await.unwrap();
-    assert!(!report.is_success());
-    assert_eq!(
-        report.services[0].failure.as_ref().unwrap().to_string(),
-        "service initialization timed out"
-    );
-    assert_eq!(report.cleanup.len(), 1);
-    assert!(report.cleanup[0].error.is_none());
-}
-
-#[tokio::test(start_paused = true)]
-async fn optional_startup_timeout_is_local_and_later_global_stop_does_not_extend_it() {
-    let (optional_entered, optional_entry) = oneshot::channel();
-    let (optional_stopped, optional_stop) = oneshot::channel();
-    let (required_stopped, mut required_stop) = oneshot::channel();
-    let app = Application::builder()
-        .options(AppOptions {
-            startup_timeout: Duration::from_secs(2),
-            shutdown_grace: Duration::from_secs(4),
-            abort_wait: Duration::from_secs(1),
-            recent_results: 8,
-        })
-        .service(
-            ServiceSpec::new("required"),
-            service_fn(move |context: ServiceContext| async move {
-                announce(&context)?;
-                context.stopping().await;
-                required_stopped.send(()).unwrap();
-                Ok::<(), BoxError>(())
-            }),
-        )
-        .service(
-            ServiceSpec::new("optional").criticality(Criticality::Optional),
-            service_fn(move |context: ServiceContext| async move {
-                optional_entered.send(()).unwrap();
-                context.stopping().await;
-                optional_stopped.send(()).unwrap();
-                std::future::pending::<()>().await;
-                Ok::<(), BoxError>(())
-            }),
-        )
-        .build()
-        .unwrap();
-    let control = app.start().unwrap();
-    optional_entry.await.unwrap();
-    control.observer().ready(LIMIT).await.unwrap();
-    tokio::time::advance(Duration::from_secs(2)).await;
-    optional_stop.await.unwrap();
-    assert!(matches!(
-        required_stop.try_recv(),
-        Err(oneshot::error::TryRecvError::Empty)
-    ));
-    tokio::time::advance(Duration::from_secs(1)).await;
-    control.stop();
-    required_stop.await.unwrap();
-    tokio::time::advance(Duration::from_secs(3)).await;
-    // The optional deadline is t=6, not t=7 from the later global request.
-    let report = tokio::time::timeout(Duration::from_millis(1), control.observer().wait())
-        .await
-        .expect("global stop extended the existing optional deadline")
-        .unwrap();
-    let optional = report
-        .services
-        .iter()
-        .find(|s| s.id.as_str() == "optional")
-        .unwrap();
-    assert!(matches!(optional.outcome, Some(RootOutcome::Aborted)));
-    assert!(optional.failure.is_some());
-    assert!(!report.is_success());
-}
-
-#[tokio::test]
-async fn diamond_provider_outlives_both_branches() {
-    let (provider_stopped, mut provider_stop) = oneshot::channel();
-    let (left_stopped, left_stop) = oneshot::channel();
-    let (right_stopped, right_stop) = oneshot::channel();
-    let (release_left, left_release) = oneshot::channel();
-    let (release_right, right_release) = oneshot::channel();
-    let app = Application::builder()
-        .service(
-            ServiceSpec::new("provider"),
-            service_fn(move |context: ServiceContext| async move {
-                announce(&context)?;
-                context.stopping().await;
-                provider_stopped.send(()).unwrap();
-                Ok::<(), BoxError>(())
-            }),
-        )
-        .service(
-            ServiceSpec::new("left").depends_on("provider"),
-            service_fn(move |context: ServiceContext| async move {
-                announce(&context)?;
-                context.stopping().await;
-                left_stopped.send(()).unwrap();
-                left_release.await?;
-                Ok::<(), BoxError>(())
-            }),
-        )
-        .service(
-            ServiceSpec::new("right").depends_on("provider"),
-            service_fn(move |context: ServiceContext| async move {
-                announce(&context)?;
-                context.stopping().await;
-                right_stopped.send(()).unwrap();
-                right_release.await?;
-                Ok::<(), BoxError>(())
-            }),
-        )
-        .service(
-            ServiceSpec::new("outer")
-                .depends_on("left")
-                .depends_on("right"),
-            service_fn(|context: ServiceContext| async move {
-                announce(&context)?;
-                context.stopping().await;
-                Ok::<(), BoxError>(())
-            }),
-        )
-        .build()
-        .unwrap();
-    let control = app.start().unwrap();
-    bounded(control.observer().ready(LIMIT)).await.unwrap();
-    control.stop();
-    bounded(left_stop).await.unwrap();
-    bounded(right_stop).await.unwrap();
-    release_left.send(()).unwrap();
-    assert!(matches!(
-        provider_stop.try_recv(),
-        Err(oneshot::error::TryRecvError::Empty)
-    ));
-    release_right.send(()).unwrap();
-    bounded(provider_stop).await.unwrap();
-    assert!(
-        bounded(control.observer().wait())
-            .await
-            .unwrap()
-            .is_success()
-    );
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn started_blocking_work_retains_provider_and_cleanup_after_budget() {
-    let (started, start) = oneshot::channel();
-    let (release, blocked) = std::sync::mpsc::channel();
-    let (provider_stopped, mut provider_stop) = oneshot::channel();
-    let (cleaned, mut cleanup) = oneshot::channel();
-    let app = Application::builder()
-        .options(AppOptions {
-            shutdown_grace: Duration::from_millis(20),
-            abort_wait: Duration::from_millis(20),
-            ..AppOptions::default()
-        })
-        .service(
-            ServiceSpec::new("provider"),
-            service_fn(move |context: ServiceContext| async move {
-                context
-                    .defer_cleanup("provider-resource", move || async move {
-                        cleaned.send(()).unwrap();
-                        Ok::<(), BoxError>(())
-                    })
-                    .unwrap();
-                announce(&context)?;
-                context.stopping().await;
-                provider_stopped.send(()).unwrap();
-                Ok::<(), BoxError>(())
-            }),
-        )
-        .service(
-            ServiceSpec::new("consumer").depends_on("provider"),
-            service_fn(move |context: ServiceContext| async move {
-                context
-                    .work()
-                    .spawn_blocking(WorkSpec::new("blocking"), move |_| {
-                        started.send(()).unwrap();
-                        blocked.recv()?;
-                        Ok::<(), BoxError>(())
-                    })?;
-                announce(&context)?;
-                context.stopping().await;
-                Ok::<(), BoxError>(())
-            }),
-        )
-        .build()
-        .unwrap();
-    let control = app.start().unwrap();
-    bounded(start).await.unwrap();
-    bounded(control.observer().ready(LIMIT)).await.unwrap();
-    let budget = bounded(control.shutdown()).await.unwrap();
-    let retained = matches!(budget.as_ref(), ShutdownReport::Incomplete(snapshot)
-        if snapshot.services.iter().find(|s| s.id.as_str() == "consumer").unwrap().work.active.len() == 1);
-    let provider_pending = matches!(
-        provider_stop.try_recv(),
-        Err(oneshot::error::TryRecvError::Empty)
-    );
-    let cleanup_pending = matches!(cleanup.try_recv(), Err(oneshot::error::TryRecvError::Empty));
-    // Always release the real blocking thread before asserting observations.
-    release.send(()).unwrap();
-    bounded(cleanup).await.unwrap();
-    let report = bounded(control.observer().wait()).await.unwrap();
-    assert!(
-        report
-            .services
-            .iter()
-            .find(|s| s.id.as_str() == "provider")
-            .unwrap()
-            .outcome
-            .is_some()
-    );
-    assert!(retained && provider_pending && cleanup_pending);
-    assert!(report.is_drained());
-}
-
-#[tokio::test(start_paused = true)]
-async fn started_aggregate_survives_root_abort_and_keeps_dependency_until_certificate() {
-    let (started, start) = oneshot::channel();
-    let (release, aggregate_release) = oneshot::channel();
-    let (provider_stopped, mut provider_stop) = oneshot::channel();
-    let (cleaned, mut cleanup) = oneshot::channel();
-    let app = Application::builder()
-        .options(AppOptions {
-            shutdown_grace: Duration::from_secs(2),
-            abort_wait: Duration::from_secs(1),
-            ..AppOptions::default()
-        })
-        .service(
-            ServiceSpec::new("provider"),
-            service_fn(move |context: ServiceContext| async move {
-                context
-                    .defer_cleanup("resource", move || async move {
-                        cleaned.send(()).unwrap();
-                        Ok::<(), BoxError>(())
-                    })
-                    .unwrap();
-                announce(&context)?;
-                context.stopping().await;
-                provider_stopped.send(()).unwrap();
-                Ok::<(), BoxError>(())
-            }),
-        )
-        .service(
-            ServiceSpec::new("consumer").depends_on("provider"),
-            service_fn(move |context: ServiceContext| async move {
-                context
-                    .work()
-                    .spawn(WorkSpec::aggregate("framework"), move |_| async move {
-                        started.send(()).unwrap();
-                        aggregate_release.await?;
-                        Ok::<(), BoxError>(())
-                    })?;
-                announce(&context)?;
-                std::future::pending::<()>().await;
-                Ok::<(), BoxError>(())
-            }),
-        )
-        .build()
-        .unwrap();
-    let control = app.start().unwrap();
-    start.await.unwrap();
-    control.observer().ready(LIMIT).await.unwrap();
-    control.stop();
-    tokio::time::advance(Duration::from_secs(3)).await;
-    let budget = control.shutdown().await.unwrap();
-    assert!(matches!(budget.as_ref(), ShutdownReport::Incomplete(_)));
-    assert!(matches!(
-        provider_stop.try_recv(),
-        Err(oneshot::error::TryRecvError::Empty)
-    ));
-    assert!(matches!(
-        cleanup.try_recv(),
-        Err(oneshot::error::TryRecvError::Empty)
-    ));
-    release.send(()).unwrap();
-    cleanup.await.unwrap();
-    let report = bounded(control.observer().wait()).await.unwrap();
-    assert!(
-        report
-            .services
-            .iter()
-            .find(|s| s.id.as_str() == "provider")
-            .unwrap()
-            .outcome
-            .is_some()
-    );
-    let consumer = report
-        .services
-        .iter()
-        .find(|s| s.id.as_str() == "consumer")
-        .unwrap();
-    assert!(matches!(consumer.outcome, Some(RootOutcome::Aborted)));
-    assert_eq!(consumer.work.completed, 1);
-    assert!(consumer.work.unconfirmed.is_empty());
-    assert!(!report.is_success());
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn saved_scope_accepts_work_from_a_thread_without_runtime_context() {
-    let (send_scope, receive_scope) = oneshot::channel();
-    let app = Application::builder()
-        .service(
-            ServiceSpec::new("thread-submit"),
-            service_fn(move |context: ServiceContext| async move {
-                announce(&context)?;
-                send_scope.send(context.work().clone()).unwrap();
-                context.stopping().await;
-                Ok::<(), BoxError>(())
-            }),
-        )
-        .build()
-        .unwrap();
-    let control = app.start().unwrap();
-    let scope = bounded(receive_scope).await.unwrap();
-    let thread = std::thread::spawn(move || {
-        assert!(tokio::runtime::Handle::try_current().is_err());
-        scope
-            .spawn(WorkSpec::new("from-thread"), |_| async {
-                Ok::<(), BoxError>(())
-            })
-            .unwrap()
     });
-    let work = thread.join().unwrap();
-    let report = bounded(work.wait()).await;
+    drop(owner);
+    let observer_runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_time()
+        .build()
+        .unwrap();
+    let error = observer_runtime.block_on(running).unwrap_err();
+    let RunError::DriverLost {
+        stop_source,
+        source,
+    } = error
+    else {
+        panic!("falsely reported actual completion")
+    };
+    assert!(source.snapshot.driver_lost);
     assert_eq!(
-        report.completion(),
-        miju_services::WorkCompletion::Confirmed
+        stop_source.unwrap().to_string(),
+        "signal-before-driver-loss"
     );
-    assert!(matches!(
-        report.outcome(),
-        miju_services::WorkOutcome::Succeeded
-    ));
-    assert!(matches!(
-        bounded(control.shutdown()).await.unwrap().as_ref(),
-        ShutdownReport::Completed(report) if report.is_success()
-    ));
+}
+
+struct ErrorThenDropPanic(Arc<AtomicBool>);
+
+impl std::future::Future for ErrorThenDropPanic {
+    type Output = Result<(), BoxError>;
+    fn poll(
+        self: std::pin::Pin<&mut Self>,
+        _: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Self::Output> {
+        std::task::Poll::Ready(Err(io::Error::other("result-before-release").into()))
+    }
+}
+
+impl Drop for ErrorThenDropPanic {
+    fn drop(&mut self) {
+        self.0.store(true, Ordering::SeqCst);
+        panic!("release-panic");
+    }
 }
 
 #[tokio::test]
-async fn ready_observation_timeout_does_not_cancel_initialization_or_owned_cleanup() {
-    let (entered, entry) = oneshot::channel();
-    let (release, initialization) = oneshot::channel();
-    let (cleaned, cleanup) = oneshot::channel();
-    let app = Application::builder()
-        .service(
-            ServiceSpec::new("slow-init"),
-            service_fn(move |context: ServiceContext| async move {
-                context
-                    .defer_cleanup("acquired", move || async move {
-                        cleaned.send(()).unwrap();
-                        Ok::<(), BoxError>(())
-                    })
-                    .unwrap();
-                entered.send(()).unwrap();
-                initialization.await?;
-                announce(&context)?;
-                context.stopping().await;
-                Ok::<(), BoxError>(())
-            }),
-        )
+async fn root_and_cleanup_keep_error_and_release_panic_separately() {
+    use miju_services::{Service, report::ServiceOutcome};
+    struct FaultService(Arc<AtomicBool>);
+    impl Service for FaultService {
+        type Error = BoxError;
+        fn run(
+            self,
+            _: ServiceContext,
+        ) -> impl std::future::Future<Output = Result<(), BoxError>> + Send {
+            ErrorThenDropPanic(self.0)
+        }
+    }
+    let root_dropped = Arc::new(AtomicBool::new(false));
+    let close_dropped = Arc::new(AtomicBool::new(false));
+    let close = close_dropped.clone();
+    let error = App::builder()
+        .cleanup("release", move || ErrorThenDropPanic(close))
+        .service("fault", FaultService(root_dropped.clone()))
         .build()
-        .unwrap();
-    let control = app.start().unwrap();
-    let observer = control.observer();
-    bounded(entry).await.unwrap();
-    assert!(matches!(
-        observer.ready(Duration::ZERO).await,
-        Err(ReadyError::Timeout)
-    ));
-    assert!(!observer.snapshot().services[0].stopping);
-    release.send(()).unwrap();
-    bounded(observer.ready(LIMIT)).await.unwrap();
-    control.stop();
-    assert!(bounded(observer.wait()).await.unwrap().is_success());
-    bounded(cleanup).await.unwrap();
+        .unwrap()
+        .run_until(pending::<io::Result<()>>())
+        .await
+        .unwrap_err();
+    let report = error.report().unwrap();
+    assert!(root_dropped.load(Ordering::SeqCst));
+    assert!(close_dropped.load(Ordering::SeqCst));
+    assert!(
+        matches!(&report.snapshot.services[0].outcome, Some(ServiceOutcome::Failed(e)) if e.to_string()=="result-before-release")
+    );
+    assert!(
+        report.snapshot.services[0]
+            .failures
+            .iter()
+            .any(|f| matches!(f, ServiceFailure::ReleasePanic(_)))
+    );
+    assert_eq!(
+        report.snapshot.cleanup[0]
+            .error
+            .as_ref()
+            .unwrap()
+            .to_string(),
+        "result-before-release"
+    );
+    assert!(report.snapshot.cleanup[0].release_panic.is_some());
 }
 
-#[tokio::test]
-async fn cleanup_panic_is_retained_and_remaining_cleanup_runs() {
-    let (cleaned, cleanup) = oneshot::channel();
-    let app = Application::builder()
-        .service(
-            ServiceSpec::new("cleanup-panic"),
-            service_fn(move |context: ServiceContext| async move {
-                context
-                    .defer_cleanup("last", move || async move {
-                        cleaned.send(()).unwrap();
-                        Ok::<(), BoxError>(())
-                    })
-                    .unwrap();
-                context
-                    .defer_cleanup("panic", || async {
-                        async fn fail() -> Result<(), BoxError> {
-                            panic!("cleanup failure");
-                        }
-                        fail().await
-                    })
-                    .unwrap();
-                announce(&context)?;
-                context.stopping().await;
-                Ok::<(), BoxError>(())
-            }),
-        )
+#[test]
+fn unstarted_cleanup_is_not_an_async_drop_guarantee() {
+    let closed = Arc::new(AtomicBool::new(false));
+    let close = closed.clone();
+    assert!(
+        App::builder()
+            .cleanup("store", move || async move {
+                close.store(true, Ordering::SeqCst);
+                Ok(())
+            })
+            .build()
+            .is_err()
+    );
+    assert!(!closed.load(Ordering::SeqCst));
+    let close = closed.clone();
+    let app = App::builder()
+        .cleanup("store", move || async move {
+            close.store(true, Ordering::SeqCst);
+            Ok(())
+        })
+        .service_fn("service", resident)
         .build()
         .unwrap();
-    let control = app.start().unwrap();
-    bounded(control.observer().ready(LIMIT)).await.unwrap();
-    control.stop();
-    let report = bounded(control.observer().wait()).await.unwrap();
-    bounded(cleanup).await.unwrap();
-    assert!(!report.is_success());
-    assert_eq!(report.cleanup[0].label, "panic");
-    assert!(report.cleanup[0].error.is_some());
-    assert_eq!(report.cleanup[1].label, "last");
-    assert!(report.cleanup[1].error.is_none());
+    drop(app);
+    assert!(!closed.load(Ordering::SeqCst));
+}
+
+#[test]
+fn build_rejects_invalid_dag_and_budgets_without_running_entries() {
+    assert!(App::builder().build().is_err());
+    assert!(App::builder().service_fn(" ", resident).build().is_err());
+    assert!(
+        App::builder()
+            .service_fn("a", resident)
+            .service_fn("a", resident)
+            .build()
+            .is_err()
+    );
+    assert!(
+        App::builder()
+            .service_fn(ServiceSpec::new("a").depends_on("missing"), resident)
+            .build()
+            .is_err()
+    );
+    assert!(
+        App::builder()
+            .service_fn(ServiceSpec::new("a").depends_on("a"), resident)
+            .build()
+            .is_err()
+    );
+    assert!(
+        App::builder()
+            .service_fn(
+                ServiceSpec::new("a").depends_on("b").depends_on("b"),
+                resident
+            )
+            .service_fn("b", resident)
+            .build()
+            .is_err()
+    );
+    assert!(
+        App::builder()
+            .service_fn(ServiceSpec::new("a").depends_on("b"), resident)
+            .service_fn(
+                ServiceSpec::new("b").criticality(Criticality::Optional),
+                resident
+            )
+            .build()
+            .is_err()
+    );
+    assert!(
+        App::builder()
+            .options(AppOptions {
+                shutdown_grace: Duration::ZERO,
+                ..AppOptions::default()
+            })
+            .service_fn("a", resident)
+            .build()
+            .is_err()
+    );
+    assert!(
+        App::builder()
+            .options(AppOptions {
+                abort_wait: Duration::MAX,
+                ..AppOptions::default()
+            })
+            .service_fn("a", resident)
+            .build()
+            .is_err()
+    );
 }

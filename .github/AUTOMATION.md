@@ -7,19 +7,17 @@ repository settings or prove that GitHub-hosted jobs have run.
 ## Pull requests and maintenance
 
 - `CODEOWNERS` assigns review ownership to `@RivTian`.
-- Dependabot checks Cargo and GitHub Actions weekly.
+- Dependabot checks the root Cargo package and GitHub Actions weekly. The JNI example ships `Cargo.toml.in`, so it is not a standalone Dependabot Cargo directory. Synchronize its template and lockfile with relevant root dependency changes; real JVM CI builds that consumer with `--locked`.
 - The issue forms request reproduction details or a concrete use case. The PR
   template asks for the behavior change and relevant validation.
 - `ci.yaml` follows miju with separate cargo-check, cargo-test, cargo-fmt,
   cargo-clippy, cargo-doc and cargo-udeps jobs. Direct Cargo steps retain the
   Linux/macOS/Windows default, minimal and all-feature matrix and Rust 1.89.
   Ordinary checks use `actions-rust-lang/setup-rust-toolchain`; docs and udeps
-  use nightly as in miju. Windows remains
-  configured for subsequent hosted validation. The separate original Windows
-  x64 run passed functional checks; resource-trend v2 remains on hold.
+  use nightly as in miju. Each PR is checked on its own source input; prior beta platform results do not certify the refactor.
 - The `jvm` CI job defines Linux/macOS, JDK 17/21 and stable/MSRV real UDP
   consumer runs with `-Xcheck:jni`. Windows JNI and Android ART are unvalidated.
-  These workflow definitions do not claim any hosted run has occurred.
+  Its implementation and CI job arrive with the JNI batch. Platform acceptance remains tied to actual run evidence.
 - `pr-checks.yaml` prepares same-repository PRs, then validates the live title and
   changelog. Titles contain the PR's own `#N`. Dependabot titles and changelog
   entries are exempt; maintainers can use `skip-changelog` to waive the entry check.
