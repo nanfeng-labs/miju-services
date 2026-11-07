@@ -361,6 +361,7 @@ impl WorkScope {
         if gate.entries.len() >= self.0.capacity {
             return Err(SpawnError::AtCapacity);
         }
+        #[allow(deprecated, reason = "try_update is newer than the Rust 1.89 MSRV")]
         let id = self
             .0
             .ids
