@@ -63,11 +63,11 @@
 
 需要 **Rust 1.89+**，以及启用了时间功能的 Tokio 运行时。
 
-下方示例使用 `0.2.0-beta.1` API。从 `0.1.0-beta` 迁移时，请先查看 [CHANGELOG](https://github.com/nanfeng-labs/miju-services/blob/v0.2.0-beta.1/CHANGELOG.md) 中的不兼容变更。
+下方示例使用 `0.2.0-beta.2` API。升级时，请先查看 [CHANGELOG](https://github.com/nanfeng-labs/miju-services/blob/v0.2.0-beta.2/CHANGELOG.md) 中的不兼容变更。
 
 ```toml
 [dependencies]
-miju-services = "0.2.0-beta.1"
+miju-services = "0.2.0-beta.2"
 tokio = { version = "1", features = ["rt", "time", "sync", "macros", "signal"] }
 ```
 

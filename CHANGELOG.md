@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+## [0.2.0-beta.2]
+
+- bump: to v0.2.0-beta.2 ([#18](https://github.com/nanfeng-labs/miju-services/pull/18))
+
 - fix: improve snapshot compatibility and app examples ([#17](https://github.com/nanfeng-labs/miju-services/pull/17))
 
 ### Breaking changes
