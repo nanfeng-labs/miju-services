@@ -9,7 +9,11 @@ description = "Application assembly, service lifecycles, owned work, and resourc
 include = ["src/**/*.rs", "examples/**/*.rs", "examples/configured_app/README.md", "examples/configured_app/settings.toml", "tests/**/*.rs", "Cargo.toml", "Cargo.lock", "README.md", "README.zh-CN.md", "LICENSE", "CHANGELOG.md"]
 
 [features]
-default = []
+default = ["miju", "periodic"]
+## Attach miju Workers and Monitors without replacing their execution policy.
+miju = ["dep:miju", "dep:futures-util"]
+## Run serial periodic operations as service-owned work.
+periodic = []
 ## Emit lifecycle warnings without installing a subscriber.
 tracing = ["dep:tracing"]
 ## Generate the feature reference in documentation.
@@ -21,9 +25,16 @@ tokio-util = { version = "0.7.20", features = ["rt"] }
 thiserror = "2.0.21"
 tracing = { version = "0.1.44", default-features = false, optional = true }
 document-features = { version = "0.2.12", optional = true }
+miju = { version = "0.2.0", default-features = false, optional = true }
+futures-util = { version = "0.3.34", default-features = false, features = ["std"], optional = true }
 
 
 [dev-dependencies]
+futures-util = { version = "0.3.34", default-features = false, features = ["std"] }
+miju = { version = "0.2.0", default-features = false, features = ["retry"] }
+miju-cron = { version = "0.2.0", default-features = false, features = ["cron"] }
+cron = "0.17.0"
+tower = { version = "0.5.3", default-features = false, features = ["limit", "util"] }
 clap = { version = "4.6.7", default-features = false, features = ["derive", "std", "help", "usage", "error-context"] }
 config = { version = "0.15.27", default-features = false, features = ["toml"] }
 serde = { version = "1.0.229", features = ["derive"] }
@@ -44,3 +55,23 @@ rustdoc-args = ["--cfg", "docsrs"]
 
 [package.metadata.cargo-udeps.ignore]
 normal = ["document-features"]
+
+[[example]]
+name = "miju_worker"
+required-features = ["miju"]
+
+[[example]]
+name = "miju_monitor"
+required-features = ["miju"]
+
+[[example]]
+name = "periodic"
+required-features = ["periodic"]
+
+[[example]]
+name = "cron_worker"
+required-features = ["miju"]
+
+[[example]]
+name = "bounded_queue_rounds"
+required-features = ["miju"]

@@ -166,12 +166,20 @@ pub(crate) struct ContextState {
     pub(crate) health: Health,
     pub(crate) declared_health: bool,
     pub(crate) root_released: bool,
+    #[cfg(feature = "periodic")]
+    pub(crate) periodic: Option<crate::periodic::PeriodicSnapshot>,
+    #[cfg(feature = "miju")]
+    pub(crate) execution_errors: u64,
+    #[cfg(feature = "miju")]
+    pub(crate) recent_execution_errors: std::collections::VecDeque<crate::SharedError>,
 }
 
 pub(crate) struct ContextShared {
     pub(crate) state: Mutex<ContextState>,
     pub(crate) stop: CancellationToken,
     pub(crate) changed: Arc<Notify>,
+    #[cfg(feature = "miju")]
+    pub(crate) history_limit: usize,
 }
 
 /// Readiness, local stop, work ownership, and initialization cleanup for one service.
@@ -193,6 +201,27 @@ impl fmt::Debug for ServiceContext {
 }
 
 impl ServiceContext {
+    #[cfg(feature = "periodic")]
+    pub(crate) fn update_periodic(&self, snapshot: crate::periodic::PeriodicSnapshot) {
+        self.shared.state.lock().unwrap().periodic = Some(snapshot);
+        self.shared.changed.notify_waiters();
+    }
+
+    #[cfg(feature = "miju")]
+    pub(crate) fn record_execution_error(&self, error: crate::SharedError) {
+        let mut state = self.shared.state.lock().unwrap();
+        state.execution_errors = state.execution_errors.saturating_add(1);
+        state.recent_execution_errors.push_back(error);
+        let evicted = if state.recent_execution_errors.len() > self.shared.history_limit {
+            state.recent_execution_errors.pop_front()
+        } else {
+            None
+        };
+        drop(state);
+        drop(evicted);
+        self.shared.changed.notify_waiters();
+    }
+
     /// This service's identity.
     pub fn id(&self) -> &ServiceId {
         &self.id

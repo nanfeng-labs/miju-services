@@ -9,6 +9,14 @@ pub mod report;
 pub mod service;
 pub mod work;
 
+#[cfg(feature = "miju")]
+#[cfg_attr(docsrs, doc(cfg(feature = "miju")))]
+pub mod miju;
+
+#[cfg(feature = "periodic")]
+#[cfg_attr(docsrs, doc(cfg(feature = "periodic")))]
+pub mod periodic;
+
 mod task;
 
 pub use app::{App, AppBuilder, AppHandle, BuildError, RunError, StartError};

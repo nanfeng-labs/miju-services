@@ -10,9 +10,9 @@
   <a href="LICENSE">MIT</a> · Rust 1.89+
 </p>
 
-`miju-services` is a Rust service foundation for [miju](https://github.com/nanfeng-labs/miju). It gives applications one place to assemble ordinary services, observe readiness and health, and wait for actual work and resource cleanup. The application owns its Tokio runtime, business configuration, resources, and logging setup.
+`miju-services` is a Rust service foundation for [miju](https://github.com/nanfeng-labs/miju). It gives applications one place to assemble ordinary services and miju workers, observe readiness and health, and wait for actual work and resource cleanup. The application owns its Tokio runtime, business configuration, resources, and logging setup.
 
-This unpublished `0.2` checkout implements ordinary lifecycles, application configuration and resource assembly. The published `0.1.0-beta` has a different API. Other integrations follow in later batches.
+This unpublished `0.2` checkout implements ordinary lifecycles, application configuration and resource assembly, real miju Worker/Monitor integration and direct periodic operations. The published `0.1.0-beta` has a different API. Other integrations follow in later batches.
 
 ## Usage
 
@@ -56,6 +56,56 @@ tokio = { version = "1", features = ["rt", "time", "sync", "macros", "signal"] }
 ```
 
 The library does not install signal handlers. The example application enables Tokio's `signal` feature. A multithreaded `#[tokio::main]` also needs `rt-multi-thread`.
+
+## miju and periodic operations
+
+Keep the worker's backend, middleware, and job function in miju. The factory receives the context used for both construction and lifecycle control:
+
+```rust,no_run
+# #[cfg(feature = "miju")]
+# async fn worker_example() -> Result<(), miju_services::BoxError> {
+use miju::prelude::{MemoryStorage, WorkerBuilder};
+use miju_services::{App, miju::worker_from};
+
+let jobs = MemoryStorage::new();
+App::builder()
+    .service("devices", worker_from(move |context| {
+        WorkerBuilder::new(context)
+            .backend(jobs)
+            .build(|device: String| async move { println!("Read {device}"); })
+            .stream()
+    }))
+    .build()?
+    .run_until(tokio::signal::ctrl_c())
+    .await?;
+# Ok(())
+# }
+```
+
+Use the supplied context, rather than creating another worker context. Start establishes the worker driver, not remote backend readiness. The bridge keeps polling the original stream after stop; job errors remain observable in snapshots. Backend failure or Monitor restart history leaves aggregate responsibility unconfirmed and prevents cleanup from being certified. A Monitor is one grouped service: its worker failures may be delayed by resident siblings. See [worker](examples/miju_worker.rs) and [monitor](examples/miju_monitor.rs).
+
+For a simple polling operation, no queue is needed:
+
+```rust
+# #[cfg(feature = "periodic")]
+# fn periodic_example() -> Result<(), miju_services::BoxError> {
+use miju_services::{App, periodic};
+use std::time::Duration;
+
+let app = App::builder()
+    .service("device-status", periodic::fixed_delay(Duration::from_secs(5), || async {
+        println!("Collect device status");
+        Ok(())
+    })?)
+    .build()?;
+# let _ = app;
+# Ok(())
+# }
+```
+
+`fixed_delay` waits after completion. `fixed_rate_skip` uses fixed slots and skips busy or missed opportunities. If a round starts at second 0 and finishes at second 8 with a five-second period, the next start is second 13 or second 10, respectively. Defaults are immediate first execution, serial rounds, and recorded business errors followed by the next period; there is no hidden retry. Use `PeriodicRule` and `RoundContext` for a delayed first round, concrete errors, cooperative stopping, or failure escalation.
+
+Calendar work uses [miju-cron directly as a backend](examples/cron_worker.rs). The advanced [bounded queue example](examples/bounded_queue_rounds.rs) adds application-owned admission, target overlap policy, and final receipts around miju execution. Its capacity covers queued plus running work; stop finishes taken jobs and cancels the rest. Receipts wrap the full configured retry chain. `MemoryStorage` itself is unbounded; limiting worker concurrency alone does not bound backlog.
 
 ## Core concepts
 
@@ -162,10 +212,15 @@ The runtime must also have Tokio's time driver enabled. `start()` checks that a 
 | [startup_failure](examples/startup_failure.rs) | Required initialization failure exits without a host signal. |
 | [managed_work](examples/managed_work.rs) | Finite prerequisites and service-owned background work. |
 | [operational_host](examples/operational_host.rs) | Observe failure from startup and choose an explicit second-signal policy. |
+| [miju_worker](examples/miju_worker.rs) | Construct a real miju worker once and manage its lifecycle. |
+| [miju_monitor](examples/miju_monitor.rs) | Attach a group with upstream restart and aggregate-result semantics. |
+| [periodic](examples/periodic.rs) | A period and one asynchronous operation, without a queue. |
+| [cron_worker](examples/cron_worker.rs) | Calendar scheduling directly through a miju-cron backend. |
+| [bounded_queue_rounds](examples/bounded_queue_rounds.rs) | Advanced bounded admission, overlap, final receipts, and queued-job cancellation. |
 
 ## Features and development
 
-Default features are empty. The ordinary lifecycle works independently; `tracing` only emits events and `docsrs` generates feature documentation. Applications own signal handling.
+Default features are `miju` and `periodic`; either can be selected independently. `default-features = false` retains the complete ordinary lifecycle without miju. The miju dependency disables its own defaults; applications select their middleware features. `tracing` emits lifecycle events without installing a subscriber. `docsrs` generates feature documentation. Configuration, cron, queue helpers, protocols, and signal handling remain application choices.
 
 ```sh
 cargo test --all-targets --all-features --locked
