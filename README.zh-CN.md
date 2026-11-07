@@ -12,7 +12,7 @@
 
 `miju-services` 是建立在 [miju](https://github.com/nanfeng-labs/miju) 之上的 Rust 服务基座，集中装配普通服务，观察就绪和健康，并等待工作与资源实际收尾。Tokio 运行时、业务配置、资源构造和日志输出由应用负责。
 
-当前未发布的 `0.2` 工作区已实现普通生命周期。已发布的 `0.1.0-beta` 使用另一套 API；其他集成在后续批次接入。
+当前未发布的 `0.2` 工作区已实现普通生命周期、应用配置与资源装配示例。已发布的 `0.1.0-beta` 使用另一套 API；其他集成在后续批次接入。
 
 ## 使用
 
@@ -93,6 +93,7 @@ let app = App::builder()
 
 `start` 接纳前，回滚归应用 bootstrap 负责。应用须保留回滚所需的独立访问能力；丢弃 builder 或尚未启动的 `App` 无法执行异步清理。缺少 Tokio 运行时导致的启动拒绝可用 `StartError::into_app()` 取回装配。接纳后，登记的清理归 driver 负责，包含部分初始化失败的收尾。[共享资源示例](examples/shared_resource.rs) 展示这个边界及具体 `Service` 实现。
 
+[configured_app](examples/configured_app/README.md) 展示默认值 → 显式 TOML → 应用环境变量 → CLI，解释各有效值的来源，在校验后打开文件并集中装配采样服务。[watch 示例](examples/watched_settings.rs) 另行展示每轮持有一份不可变配置快照。配置依赖只用于示例，不进入普通库消费者的依赖树。
 
 ### 就绪与健康
 
@@ -156,6 +157,8 @@ assert!(report.is_success());
 | --- | --- |
 | [basic](examples/basic.rs) | 注册函数，运行至 Ctrl-C。 |
 | [shared_resource](examples/shared_resource.rs) | 强类型设置、构造传参、清理和启动前回滚。 |
+| [configured_app](examples/configured_app/README.md) | 多来源配置、强类型设置、集中装配与文件清理。 |
+| [watched_settings](examples/watched_settings.rs) | 单轮固定快照与应用持有的配置更新。 |
 | [startup_failure](examples/startup_failure.rs) | 必要初始化失败，无须宿主信号即可退出。 |
 | [managed_work](examples/managed_work.rs) | 有限前置步骤及服务所属后台工作。 |
 | [operational_host](examples/operational_host.rs) | 从启动起观察故障，明确第二次信号策略。 |

@@ -1,0 +1,2 @@
+sample_interval_ms = 1000
+output_file = "configured-samples.log"

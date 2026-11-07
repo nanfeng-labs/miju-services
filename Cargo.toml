@@ -6,7 +6,7 @@ rust-version = "1.89"
 license = "MIT"
 repository = "https://github.com/nanfeng-labs/miju-services"
 description = "Application assembly, service lifecycles, owned work, and resource cleanup for miju"
-include = ["src/**/*.rs", "examples/**/*.rs", "tests/**/*.rs", "Cargo.toml", "Cargo.lock", "README.md", "README.zh-CN.md", "LICENSE", "CHANGELOG.md"]
+include = ["src/**/*.rs", "examples/**/*.rs", "examples/configured_app/README.md", "examples/configured_app/settings.toml", "tests/**/*.rs", "Cargo.toml", "Cargo.lock", "README.md", "README.zh-CN.md", "LICENSE", "CHANGELOG.md"]
 
 [features]
 default = []
@@ -24,7 +24,10 @@ document-features = { version = "0.2.12", optional = true }
 
 
 [dev-dependencies]
-tokio = { version = "1.54.1", features = ["rt-multi-thread", "test-util", "signal"] }
+clap = { version = "4.6.7", default-features = false, features = ["derive", "std", "help", "usage", "error-context"] }
+config = { version = "0.15.27", default-features = false, features = ["toml"] }
+serde = { version = "1.0.229", features = ["derive"] }
+tokio = { version = "1.54.1", features = ["rt-multi-thread", "test-util", "signal", "fs", "io-util"] }
 
 [lints.rust]
 unsafe_code = "deny"
