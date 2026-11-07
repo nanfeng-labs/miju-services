@@ -1,18 +1,77 @@
+<p align="center">
+  <img src="https://raw.githubusercontent.com/nanfeng-labs/miju-services/main/assets/miju-services-header.svg" alt="miju-services" width="560" />
+</p>
+
 <h1 align="center">miju-services</h1>
 
-<p align="center">
-  <strong>集中装配服务，观察就绪，等待实际清理完成。</strong>
-</p>
+<div align="center">
+  <strong>服务装配、生命周期与受管工作，等待资源实际清理完成。</strong>
+</div>
 
-<p align="center">
-  <a href="README.md">English</a> ·
-  <a href="https://github.com/nanfeng-labs/miju">miju</a> ·
-  <a href="LICENSE">MIT</a> · Rust 1.89+
-</p>
+<br />
 
-`miju-services` 是建立在 [miju](https://github.com/nanfeng-labs/miju) 之上的 Rust 服务基座，集中装配普通服务与 miju worker，观察就绪和健康，并等待工作与资源实际收尾。Tokio 运行时、业务配置、资源构造和日志输出由应用负责。
+<div align="center">
+  <a href="https://crates.io/crates/miju-services">
+    <img src="https://img.shields.io/crates/v/miju-services.svg?label=published" alt="Published crate version" />
+  </a>
+  <a href="https://docs.rs/miju-services">
+    <img src="https://img.shields.io/badge/docs-published-blue.svg" alt="Published API documentation" />
+  </a>
+  <a href="https://github.com/nanfeng-labs/miju-services/actions/workflows/ci.yaml">
+    <img src="https://github.com/nanfeng-labs/miju-services/actions/workflows/ci.yaml/badge.svg?branch=main" alt="CI" />
+  </a>
+  <a href="https://www.rust-lang.org/">
+    <img src="https://img.shields.io/badge/MSRV-1.89-orange.svg?logo=rust" alt="Rust 1.89 or newer" />
+  </a>
+  <a href="https://github.com/nanfeng-labs/miju-services/blob/main/LICENSE">
+    <img src="https://img.shields.io/github/license/nanfeng-labs/miju-services" alt="MIT license" />
+  </a>
+</div>
 
-当前未发布的 `0.2` 工作区包含普通生命周期、应用配置与资源示例、miju Worker/Monitor 接入、直接周期操作及协议示例。已发布的 `0.1.0-beta` 使用另一套 API。可选 JNI 使用 `AppFactory` 装配同一个 `App`；新输入的宿主验收单独记录。
+<br />
+
+<div align="center">
+  <a href="README.md">English</a> · 简体中文
+</div>
+
+<br />
+
+<div align="center">
+  <a href="#功能">功能</a> ·
+  <a href="#安装">安装</a> ·
+  <a href="#使用">使用</a> ·
+  <a href="#示例">示例</a> ·
+  <a href="#工作原理">生命周期</a> ·
+  <a href="#cargo-features">功能开关</a>
+</div>
+
+<br />
+
+建立在 [miju](https://github.com/nanfeng-labs/miju) 之上的 Rust 服务基座。集中装配应用服务，观察就绪与健康状态，并在停止时明确报告后台工作和资源清理的完成情况。普通 Rust 接入由应用持有 Tokio 运行时；可选 JNI 宿主为每代应用持有自己的运行时。业务配置、资源以及日志输出位置由应用负责。
+
+## 功能
+
+- **应用装配**：集中注册服务，校验依赖关系。
+- **就绪与健康**：确认初始化完成，观察运行期间的可用状态。
+- **受管工作**：限制并跟踪异步、阻塞及外部聚合工作。
+- **停止与清理**：先排空使用方，再停止依赖提供方；工作释放后执行具名清理。
+- **miju 接入**：管理 Worker 和 Monitor 的生命周期，通过示例接入 miju-cron 日历 backend。
+- **直接周期操作**：运行一轮异步工作，支持完成后延时或固定时间网格忙则跳过。
+- **可选 JNI 宿主**：导出五个 Java 方法，为每代应用持有独立运行时。
+
+## 安装
+
+需要 **Rust 1.89+**，以及启用了时间功能的 Tokio 运行时。
+
+本仓库介绍尚未发布的 `0.2.0-beta.1` API。顶部版本与文档徽章指向已发布版本，其接口与本页不同；运行下方 `App` 示例时，请使用本地源码路径：
+
+```toml
+[dependencies]
+miju-services = { path = "../miju-services" }
+tokio = { version = "1", features = ["rt", "time", "sync", "macros", "signal"] }
+```
+
+库不安装信号处理器。示例应用自行启用 Tokio `signal` feature；使用多线程 `#[tokio::main]` 时，还需启用 `rt-multi-thread`。
 
 ## 使用
 
@@ -46,16 +105,6 @@ async fn main() -> Result<(), BoxError> {
 ```
 
 `cargo run --example basic` 运行同一装配。Ctrl-C 请求停止；服务、已接纳工作及登记的清理实际结束后，调用才返回。必要服务失败也会结束应用，无须等到 Ctrl-C。
-
-当前重构尚未发布，可通过本地路径接入：
-
-```toml
-[dependencies]
-miju-services = { path = "../miju-services" }
-tokio = { version = "1", features = ["rt", "time", "sync", "macros", "signal"] }
-```
-
-库不安装信号处理器。示例应用自行启用 Tokio `signal` feature；使用多线程 `#[tokio::main]` 时，还需启用 `rt-multi-thread`。
 
 ## miju 与周期操作
 
@@ -107,7 +156,49 @@ let app = App::builder()
 
 [日历示例](examples/cron_worker.rs) 直接以 miju-cron 为 backend。[高级队列示例](examples/bounded_queue_rounds.rs) 在 miju 执行之外加入应用自己的接纳、目标重叠策略和最终回执：容量同时覆盖排队与执行；停止完成已取作业并取消未取作业；回执在完整重试链结束后发布。`MemoryStorage` 本身无界，worker 并发限制不等于积压上限。
 
-## 核心概念
+## 示例
+
+协议沿用同一个 App 入口。HTTP 只需提供 Router，再注册示例内的 `HttpService::new(address, router)`；它在 bind 后确认 ready，停止后等待框架及 Router、请求 future 和响应 body 实际释放。WebSocket 在返回 101 前接纳会话，满载返回 503；升级回调的 socket 转交或释放也进入 HTTP 屏障。会话使用有界出站队列与两秒关闭预算。UDP 满载丢弃、不排队，已接纳数据报参与排空。另行保留的资源和裸 spawn 仍由应用负责。
+
+`cargo run --example http` 监听 `127.0.0.1:3000`；`websocket` 为 `ws://127.0.0.1:3001/ws`；`udp` 为 UDP `127.0.0.1:4000`。Ctrl-C 请求停止并等待实际清理。`embedded_runtime` 可直接运行，展示 Pending 后保留 runtime 继续等待。协议适配器位于 `examples/support`，不是库公开 API。
+
+| 示例 | 重点 |
+| --- | --- |
+| [basic](examples/basic.rs) | 注册函数，运行至 Ctrl-C。 |
+| [shared_resource](examples/shared_resource.rs) | 强类型设置、构造传参、清理和启动前回滚。 |
+| [configured_app](examples/configured_app/README.md) | 多来源配置、强类型设置、集中装配与文件清理。 |
+| [watched_settings](examples/watched_settings.rs) | 单轮固定快照与应用持有的配置更新。 |
+| [startup_failure](examples/startup_failure.rs) | 必要初始化失败，无须宿主信号即可退出。 |
+| [managed_work](examples/managed_work.rs) | 有限前置步骤及服务所属后台工作。 |
+| [operational_host](examples/operational_host.rs) | 从启动起观察故障，明确第二次信号策略。 |
+| [miju_worker](examples/miju_worker.rs) | 一次构造真实 miju worker 并管理其生命周期。 |
+| [miju_monitor](examples/miju_monitor.rs) | 按上游重启与聚合结果语义接入一组 worker。 |
+| [periodic](examples/periodic.rs) | 周期与一轮异步操作，无须队列。 |
+| [cron_worker](examples/cron_worker.rs) | 直接使用 miju-cron 日历 backend。 |
+| [bounded_queue_rounds](examples/bounded_queue_rounds.rs) | 高级有界接纳、重叠、最终回执及未取作业取消。 |
+| [http](examples/http.rs) | 提供业务 Router，bind 后就绪，等待实际释放。 |
+| [websocket](examples/websocket.rs) | 101 前接纳、升级释放屏障和有界会话关闭。 |
+| [udp](examples/udp.rs) | 满载丢弃与已接纳数据报排空。 |
+| [embedded_runtime](examples/embedded_runtime.rs) | Pending 后保留运行时，直到实际清理结束。 |
+
+## 工作原理
+
+```mermaid
+flowchart LR
+    app["App<br/>注册服务与清理"] --> run["启动与运行<br/>初始化、就绪与健康"]
+    run --> drain["停止与排空<br/>依赖顺序、工作归属"]
+    drain --> report["清理与报告<br/>释放资源、记录结果"]
+    classDef assembly fill:#fff7ed,stroke:#f97316,color:#7c2d12
+    classDef operation fill:#ecfdf5,stroke:#10b981,color:#064e3b
+    classDef ending fill:#eff6ff,stroke:#3b82f6,color:#172554
+    class app assembly
+    class run operation
+    class drain,report ending
+```
+
+正常合作停止时，工作实际释放后才进入清理并生成最终报告。预算到期不会让尚未结束的责任消失。
+
+### 核心概念
 
 - **App**：集中注册服务，校验依赖，驱动生命周期。
 - **Service**：持有自己的设置和依赖。异步函数使用 `service_fn`，实现 `Service` 的对象使用 `service`。
@@ -201,34 +292,25 @@ assert!(report.is_success());
 
 `run_until` 保留停止来源错误和最终报告。终态观察与停止来源同时就绪时，终态分支优先。需要运行诊断及第二次信号强退策略的宿主可参考[运行宿主示例](examples/operational_host.rs)；强退由应用决定，不产生完成证书。
 
-## 示例
+## Cargo features
 
-协议沿用同一个 App 入口。HTTP 只需提供 Router，再注册示例内的 `HttpService::new(address, router)`；它在 bind 后确认 ready，停止后等待框架及 Router、请求 future 和响应 body 实际释放。WebSocket 在返回 101 前接纳会话，满载返回 503；升级回调的 socket 转交或释放也进入 HTTP 屏障。会话使用有界出站队列与两秒关闭预算。UDP 满载丢弃、不排队，已接纳数据报参与排空。另行保留的资源和裸 spawn 仍由应用负责。
-
-`cargo run --example http` 监听 `127.0.0.1:3000`；`websocket` 为 `ws://127.0.0.1:3001/ws`；`udp` 为 UDP `127.0.0.1:4000`。Ctrl-C 请求停止并等待实际清理。`embedded_runtime` 可直接运行，展示 Pending 后保留 runtime 继续等待。协议适配器位于 `examples/support`，不是库公开 API。
-
-| 示例 | 重点 |
-| --- | --- |
-| [basic](examples/basic.rs) | 注册函数，运行至 Ctrl-C。 |
-| [shared_resource](examples/shared_resource.rs) | 强类型设置、构造传参、清理和启动前回滚。 |
-| [configured_app](examples/configured_app/README.md) | 多来源配置、强类型设置、集中装配与文件清理。 |
-| [watched_settings](examples/watched_settings.rs) | 单轮固定快照与应用持有的配置更新。 |
-| [startup_failure](examples/startup_failure.rs) | 必要初始化失败，无须宿主信号即可退出。 |
-| [managed_work](examples/managed_work.rs) | 有限前置步骤及服务所属后台工作。 |
-| [operational_host](examples/operational_host.rs) | 从启动起观察故障，明确第二次信号策略。 |
-| [miju_worker](examples/miju_worker.rs) | 一次构造真实 miju worker 并管理其生命周期。 |
-| [miju_monitor](examples/miju_monitor.rs) | 按上游重启与聚合结果语义接入一组 worker。 |
-| [periodic](examples/periodic.rs) | 周期与一轮异步操作，无须队列。 |
-| [cron_worker](examples/cron_worker.rs) | 直接使用 miju-cron 日历 backend。 |
-| [bounded_queue_rounds](examples/bounded_queue_rounds.rs) | 高级有界接纳、重叠、最终回执及未取作业取消。 |
-| [http](examples/http.rs) | 提供业务 Router，bind 后就绪，等待实际释放。 |
-| [websocket](examples/websocket.rs) | 101 前接纳、升级释放屏障和有界会话关闭。 |
-| [udp](examples/udp.rs) | 满载丢弃与已接纳数据报排空。 |
-| [embedded_runtime](examples/embedded_runtime.rs) | Pending 后保留运行时，直到实际清理结束。 |
-
-## Features 与开发
+| Feature | 默认启用 | 用途 |
+| --- | --- | --- |
+| `miju` | 是 | Worker 和 Monitor 生命周期接入。 |
+| `periodic` | 是 | 串行执行完成后延时或固定时间网格忙则跳过的操作。 |
+| `jni` | 否 | 五方法 Java bridge 及每代独立运行时。 |
+| `tracing` | 否 | 发出生命周期事件，不安装 subscriber。 |
+| `docsrs` | 否 | 在 rustdoc 中生成 feature 参考。 |
 
 默认 features 为 `miju` 和 `periodic`，两者也可单独启用。`default-features = false` 保留不依赖 miju 的完整普通生命周期。库关闭 miju 自身的默认 features，由应用选择 middleware。`tracing` 只发出生命周期事件，不安装 subscriber；`docsrs` 生成 feature 文档。配置、cron、队列辅助模块、协议及信号处理仍由应用选择。
+
+## JNI 宿主
+
+普通 Rust 应用继续拥有 Tokio runtime。启用默认关闭的 `jni` feature 后，工厂实现 `jni::AppFactory` 并返回未启动 `App`，通过一次 `jni::export!` 导出五个 Java 静态方法。JNI owner 为每代应用持有自己的 runtime，等待工作、清理及用户引用实际释放后才允许下一代；Java stop 超时只结束该次观察。
+
+工厂返回的未启动 App 必须可安全同步析构。需要异步关闭的资源在服务初始化中取得，并在 ready 前登记清理；builder cleanup 不代替启动前回滚。完整的 Rust 装配、Java bridge 与真实 UDP 调用见 [JNI 示例](examples/jni/README.md)。
+
+## 开发
 
 ```sh
 cargo test --all-targets --all-features --locked
@@ -237,10 +319,8 @@ cargo fmt --all -- --check
 cargo clippy --all-targets --all-features --locked -- -D warnings
 ```
 
-CI 将编译、测试、格式、Clippy、文档及未使用依赖检查拆为独立 jobs，并配置 Linux/macOS/Windows 测试及 Rust 1.89 验证。工作流配置不表示托管任务已经运行通过。
+CI 将编译、测试、格式、Clippy、文档及未使用依赖检查拆为独立 jobs，并配置 Linux/macOS/Windows 测试及 Rust 1.89 验证。
 
-## JNI 宿主
+## 许可证
 
-普通 Rust 应用继续拥有 Tokio runtime。启用默认关闭的 `jni` feature 后，工厂实现 `jni::AppFactory` 并返回未启动 `App`，通过一次 `jni::export!` 导出五个 Java 静态方法。JNI owner 为每代应用持有自己的 runtime，等待工作、清理及用户引用实际释放后才允许下一代；Java stop 超时只结束该次观察。
-
-工厂返回的未启动 App 必须可安全同步析构。需要异步关闭的资源在服务初始化中取得，并在 ready 前登记清理；builder cleanup 不代替启动前回滚。完整的 Rust 装配、Java bridge 与真实 UDP 调用见 [JNI 示例](examples/jni/README.md)。
+miju-services 采用 [MIT 许可证](https://github.com/nanfeng-labs/miju-services/blob/main/LICENSE)。
