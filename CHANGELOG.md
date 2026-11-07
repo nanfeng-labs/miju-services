@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+- docs(readme): restore branding and align bilingual guides with miju ([#15](https://github.com/nanfeng-labs/miju-services/pull/15))
+
 - refactor(jni): assemble App with verified runtime ownership ([#14](https://github.com/nanfeng-labs/miju-services/pull/14))
 - refactor(examples): simplify protocol and embedded hosts ([#13](https://github.com/nanfeng-labs/miju-services/pull/13))
 - refactor(miju): simplify worker and periodic service integration ([#12](https://github.com/nanfeng-labs/miju-services/pull/12))

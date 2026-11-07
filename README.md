@@ -1,18 +1,77 @@
+<p align="center">
+  <img src="https://raw.githubusercontent.com/nanfeng-labs/miju-services/main/assets/miju-services-header.svg" alt="miju-services" width="560" />
+</p>
+
 <h1 align="center">miju-services</h1>
 
-<p align="center">
-  <strong>Assemble services, observe readiness, and wait for real cleanup.</strong>
-</p>
+<div align="center">
+  <strong>Application assembly, service lifecycles, and owned work for Rust</strong>
+</div>
 
-<p align="center">
-  <a href="README.zh-CN.md">简体中文</a> ·
-  <a href="https://github.com/nanfeng-labs/miju">miju</a> ·
-  <a href="LICENSE">MIT</a> · Rust 1.89+
-</p>
+<br />
 
-`miju-services` is a Rust service foundation for [miju](https://github.com/nanfeng-labs/miju). It gives applications one place to assemble ordinary services and miju workers, observe readiness and health, and wait for actual work and resource cleanup. The application owns its Tokio runtime, business configuration, resources, and logging setup.
+<div align="center">
+  <a href="https://crates.io/crates/miju-services">
+    <img src="https://img.shields.io/crates/v/miju-services.svg?label=published" alt="Published crate version" />
+  </a>
+  <a href="https://docs.rs/miju-services">
+    <img src="https://img.shields.io/badge/docs-published-blue.svg" alt="Published API documentation" />
+  </a>
+  <a href="https://github.com/nanfeng-labs/miju-services/actions/workflows/ci.yaml">
+    <img src="https://github.com/nanfeng-labs/miju-services/actions/workflows/ci.yaml/badge.svg?branch=main" alt="CI" />
+  </a>
+  <a href="https://www.rust-lang.org/">
+    <img src="https://img.shields.io/badge/MSRV-1.89-orange.svg?logo=rust" alt="Rust 1.89 or newer" />
+  </a>
+  <a href="https://github.com/nanfeng-labs/miju-services/blob/main/LICENSE">
+    <img src="https://img.shields.io/github/license/nanfeng-labs/miju-services" alt="MIT license" />
+  </a>
+</div>
 
-This unpublished `0.2` checkout includes ordinary lifecycles, application configuration/resource examples, miju Worker/Monitor integration, direct periodic operations, and protocol examples. The published `0.1.0-beta` has a different API. Optional JNI hosting uses `AppFactory` to assemble the same `App`; host acceptance is tracked separately.
+<br />
+
+<div align="center">
+  English · <a href="README.zh-CN.md">简体中文</a>
+</div>
+
+<br />
+
+<div align="center">
+  <a href="#features">Features</a> ·
+  <a href="#installation">Installation</a> ·
+  <a href="#usage">Usage</a> ·
+  <a href="#examples">Examples</a> ·
+  <a href="#how-miju-services-works">Lifecycle</a> ·
+  <a href="#cargo-features">Cargo features</a>
+</div>
+
+<br />
+
+A Rust service foundation built on [miju](https://github.com/nanfeng-labs/miju). Assemble application services, observe readiness and health, and wait for background work and resource cleanup. Ordinary Rust applications own their Tokio runtime; the optional JNI host owns one runtime per generation. Business configuration, resources, and logging remain application responsibilities.
+
+## Features
+
+- **Application assembly**: register services in one place and validate their dependencies.
+- **Readiness and health**: confirm initialization and observe changing availability.
+- **Owned work**: bound and track asynchronous, blocking, and externally aggregated work.
+- **Shutdown and cleanup**: drain consumers before providers and run named cleanup actions after work releases.
+- **miju integration**: attach Workers and Monitors, with miju-cron demonstrated as a calendar backend.
+- **Direct periodic operations**: run one asynchronous round with fixed-delay or fixed-grid-skip timing.
+- **Optional JNI hosting**: export five Java methods and retain one runtime per application generation.
+
+## Installation
+
+Requires **Rust 1.89+** and a Tokio runtime with time enabled.
+
+This checkout documents the unreleased `0.2.0-beta.1` API. The version and documentation badges link to the published release, whose API differs from this page. Use a path dependency for the `App` examples below:
+
+```toml
+[dependencies]
+miju-services = { path = "../miju-services" }
+tokio = { version = "1", features = ["rt", "time", "sync", "macros", "signal"] }
+```
+
+The library does not install signal handlers. The example application enables Tokio's `signal` feature. A multithreaded `#[tokio::main]` also needs `rt-multi-thread`.
 
 ## Usage
 
@@ -46,16 +105,6 @@ async fn main() -> Result<(), BoxError> {
 ```
 
 Run the same assembly with `cargo run --example basic`. Ctrl-C requests shutdown; the function returns after services, accepted work, and registered cleanup have finished. A required service failure also ends the application without waiting for Ctrl-C.
-
-For this unreleased checkout, use a path dependency:
-
-```toml
-[dependencies]
-miju-services = { path = "../miju-services" }
-tokio = { version = "1", features = ["rt", "time", "sync", "macros", "signal"] }
-```
-
-The library does not install signal handlers. The example application enables Tokio's `signal` feature. A multithreaded `#[tokio::main]` also needs `rt-multi-thread`.
 
 ## miju and periodic operations
 
@@ -107,7 +156,49 @@ let app = App::builder()
 
 Calendar work uses [miju-cron directly as a backend](examples/cron_worker.rs). The advanced [bounded queue example](examples/bounded_queue_rounds.rs) adds application-owned admission, target overlap policy, and final receipts around miju execution. Its capacity covers queued plus running work; stop finishes taken jobs and cancels the rest. Receipts wrap the full configured retry chain. `MemoryStorage` itself is unbounded; limiting worker concurrency alone does not bound backlog.
 
-## Core concepts
+## Examples
+
+Protocols use the same App entry point. Supply a Router and register the example-local `HttpService::new(address, router)`. It reports ready after binding and waits for the framework, Router, request futures, and response bodies to release. WebSocket reserves a session before returning 101 and returns 503 at capacity; its upgrade callback also holds the HTTP release barrier until it transfers or drops the socket. Sessions use a bounded outgoing queue and a two-second close budget. UDP drops overload without queuing and drains accepted datagrams. Separately retained resources and detached tasks remain application responsibilities.
+
+Run `cargo run --example http` for `127.0.0.1:3000`, `websocket` for `ws://127.0.0.1:3001/ws`, or `udp` for UDP `127.0.0.1:4000`. Ctrl-C requests shutdown and waits for actual cleanup. Run `embedded_runtime` to observe Pending while retaining the runtime until completion. Protocol adapters live in `examples/support` and are not public library API.
+
+| Example | Focus |
+| --- | --- |
+| [basic](examples/basic.rs) | Register a function and run until Ctrl-C. |
+| [shared_resource](examples/shared_resource.rs) | Typed settings, constructor injection, cleanup, and bootstrap rollback. |
+| [configured_app](examples/configured_app/README.md) | Multiple configuration sources, typed settings, centralized assembly, and file cleanup. |
+| [watched_settings](examples/watched_settings.rs) | Immutable per-round snapshots and application-owned configuration updates. |
+| [startup_failure](examples/startup_failure.rs) | Required initialization failure exits without a host signal. |
+| [managed_work](examples/managed_work.rs) | Finite prerequisites and service-owned background work. |
+| [operational_host](examples/operational_host.rs) | Observe failure from startup and choose an explicit second-signal policy. |
+| [miju_worker](examples/miju_worker.rs) | Construct a real miju worker once and manage its lifecycle. |
+| [miju_monitor](examples/miju_monitor.rs) | Attach a group with upstream restart and aggregate-result semantics. |
+| [periodic](examples/periodic.rs) | A period and one asynchronous operation, without a queue. |
+| [cron_worker](examples/cron_worker.rs) | Calendar scheduling directly through a miju-cron backend. |
+| [bounded_queue_rounds](examples/bounded_queue_rounds.rs) | Advanced bounded admission, overlap, final receipts, and queued-job cancellation. |
+| [http](examples/http.rs) | Supply business routes, bind before ready, and wait for actual release. |
+| [websocket](examples/websocket.rs) | Admit before 101, retain upgrade responsibility, and bound session close. |
+| [udp](examples/udp.rs) | Drop overload and drain accepted datagrams. |
+| [embedded_runtime](examples/embedded_runtime.rs) | Retain the runtime after Pending until cleanup actually completes. |
+
+## How miju-services works
+
+```mermaid
+flowchart LR
+    app["App<br/>Register services and cleanup"] --> run["Start and run<br/>Initialize, ready, observe health"]
+    run --> drain["Stop and drain<br/>Respect dependencies and owned work"]
+    drain --> report["Cleanup and report<br/>Release resources, record outcome"]
+    classDef assembly fill:#fff7ed,stroke:#f97316,color:#7c2d12
+    classDef operation fill:#ecfdf5,stroke:#10b981,color:#064e3b
+    classDef ending fill:#eff6ff,stroke:#3b82f6,color:#172554
+    class app assembly
+    class run operation
+    class drain,report ending
+```
+
+On cooperative shutdown, work must actually release before cleanup and the final report. Budget expiry keeps unfinished responsibility owned.
+
+### Core concepts
 
 - **App** collects service registrations, validates dependencies, and runs the lifecycle driver.
 - **Service** owns its settings and dependencies. Use `service_fn` for an asynchronous function or `service` for a type implementing `Service`.
@@ -201,34 +292,25 @@ The runtime must also have Tokio's time driver enabled. `start()` checks that a 
 
 `run_until` retains errors from the stop source alongside the final report. Its terminal branch has priority when both terminal observation and the stop source are ready. A host that needs diagnostics and a second-signal force-exit policy can use the [operational host example](examples/operational_host.rs); force exit is a process decision and supplies no completion certificate.
 
-## Examples
+## Cargo features
 
-Protocols use the same App entry point. Supply a Router and register the example-local `HttpService::new(address, router)`. It reports ready after binding and waits for the framework, Router, request futures, and response bodies to release. WebSocket reserves a session before returning 101 and returns 503 at capacity; its upgrade callback also holds the HTTP release barrier until it transfers or drops the socket. Sessions use a bounded outgoing queue and a two-second close budget. UDP drops overload without queuing and drains accepted datagrams. Separately retained resources and detached tasks remain application responsibilities.
-
-Run `cargo run --example http` for `127.0.0.1:3000`, `websocket` for `ws://127.0.0.1:3001/ws`, or `udp` for UDP `127.0.0.1:4000`. Ctrl-C requests shutdown and waits for actual cleanup. Run `embedded_runtime` to observe Pending while retaining the runtime until completion. Protocol adapters live in `examples/support` and are not public library API.
-
-| Example | Focus |
-| --- | --- |
-| [basic](examples/basic.rs) | Register a function and run until Ctrl-C. |
-| [shared_resource](examples/shared_resource.rs) | Typed settings, constructor injection, cleanup, and bootstrap rollback. |
-| [configured_app](examples/configured_app/README.md) | Multiple configuration sources, typed settings, centralized assembly, and file cleanup. |
-| [watched_settings](examples/watched_settings.rs) | Immutable per-round snapshots and application-owned configuration updates. |
-| [startup_failure](examples/startup_failure.rs) | Required initialization failure exits without a host signal. |
-| [managed_work](examples/managed_work.rs) | Finite prerequisites and service-owned background work. |
-| [operational_host](examples/operational_host.rs) | Observe failure from startup and choose an explicit second-signal policy. |
-| [miju_worker](examples/miju_worker.rs) | Construct a real miju worker once and manage its lifecycle. |
-| [miju_monitor](examples/miju_monitor.rs) | Attach a group with upstream restart and aggregate-result semantics. |
-| [periodic](examples/periodic.rs) | A period and one asynchronous operation, without a queue. |
-| [cron_worker](examples/cron_worker.rs) | Calendar scheduling directly through a miju-cron backend. |
-| [bounded_queue_rounds](examples/bounded_queue_rounds.rs) | Advanced bounded admission, overlap, final receipts, and queued-job cancellation. |
-| [http](examples/http.rs) | Supply business routes, bind before ready, and wait for actual release. |
-| [websocket](examples/websocket.rs) | Admit before 101, retain upgrade responsibility, and bound session close. |
-| [udp](examples/udp.rs) | Drop overload and drain accepted datagrams. |
-| [embedded_runtime](examples/embedded_runtime.rs) | Retain the runtime after Pending until cleanup actually completes. |
-
-## Features and development
+| Feature | Default | Purpose |
+| --- | --- | --- |
+| `miju` | Yes | Worker and Monitor lifecycle integration. |
+| `periodic` | Yes | Serial fixed-delay and fixed-grid-skip operations. |
+| `jni` | No | Five-method Java bridge and one owned runtime per generation. |
+| `tracing` | No | Lifecycle events without installing a subscriber. |
+| `docsrs` | No | Generate the feature reference in rustdoc. |
 
 Default features are `miju` and `periodic`; either can be selected independently. `default-features = false` retains the complete ordinary lifecycle without miju. The miju dependency disables its own defaults; applications select their middleware features. `tracing` emits lifecycle events without installing a subscriber. `docsrs` generates feature documentation. Configuration, cron, queue helpers, protocols, and signal handling remain application choices.
+
+## JNI hosting
+
+Ordinary Rust applications keep their own Tokio runtime. With the default-off `jni` feature, implement `jni::AppFactory` to return an unstarted `App` and invoke `jni::export!` once for five Java static methods. The JNI owner retains one runtime per generation until work, cleanup and user references have actually released. A Java stop timeout ends only that observation.
+
+The unstarted App returned by the factory must be safe to drop synchronously. Acquire async-close resources inside service initialization and register cleanup before ready; builder cleanup is not pre-start rollback. See the [JNI example](examples/jni/README.md) for Rust assembly, Java declarations and a real UDP caller.
+
+## Development
 
 ```sh
 cargo test --all-targets --all-features --locked
@@ -237,10 +319,8 @@ cargo fmt --all -- --check
 cargo clippy --all-targets --all-features --locked -- -D warnings
 ```
 
-CI runs separate check, test, format, Clippy, documentation, and unused-dependency jobs, with Linux/macOS/Windows test and Rust 1.89 coverage. Workflow configuration does not claim that a hosted run has completed.
+CI runs separate check, test, format, Clippy, documentation, and unused-dependency jobs, with Linux/macOS/Windows test and Rust 1.89 coverage.
 
-## JNI hosting
+## License
 
-Ordinary Rust applications keep their own Tokio runtime. With the default-off `jni` feature, implement `jni::AppFactory` to return an unstarted `App` and invoke `jni::export!` once for five Java static methods. The JNI owner retains one runtime per generation until work, cleanup and user references have actually released. A Java stop timeout ends only that observation.
-
-The unstarted App returned by the factory must be safe to drop synchronously. Acquire async-close resources inside service initialization and register cleanup before ready; builder cleanup is not pre-start rollback. See the [JNI example](examples/jni/README.md) for Rust assembly, Java declarations and a real UDP caller.
+miju-services is licensed under the [MIT License](https://github.com/nanfeng-labs/miju-services/blob/main/LICENSE).

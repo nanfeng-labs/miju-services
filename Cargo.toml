@@ -6,7 +6,7 @@ rust-version = "1.89"
 license = "MIT"
 repository = "https://github.com/nanfeng-labs/miju-services"
 description = "Application assembly, service lifecycles, owned work, and resource cleanup for miju"
-include = ["src/**/*.rs", "examples/**/*.rs", "examples/jni/Cargo.toml.in", "examples/jni/Cargo.lock", "examples/jni/README.md", "examples/jni/run.py", "examples/jni/java/**/*.java", "examples/configured_app/README.md", "examples/configured_app/settings.toml", "tests/**/*.rs", "Cargo.toml", "Cargo.lock", "README.md", "README.zh-CN.md", "LICENSE", "CHANGELOG.md"]
+include = ["src/**/*.rs", "examples/**/*.rs", "examples/jni/Cargo.toml.in", "examples/jni/Cargo.lock", "examples/jni/README.md", "examples/jni/run.py", "examples/jni/java/**/*.java", "examples/configured_app/README.md", "examples/configured_app/settings.toml", "tests/**/*.rs", "Cargo.toml", "Cargo.lock", "README.md", "README.zh-CN.md", "LICENSE", "CHANGELOG.md", "assets/**"]
 
 [features]
 default = ["miju", "periodic"]
