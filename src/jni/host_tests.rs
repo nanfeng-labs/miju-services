@@ -359,11 +359,16 @@ fn blocking_work_prevents_reuse_until_its_real_completion() {
     assert_eq!(bridge.start(vec![key.clone(), "blocking".into()]), 0);
     until(|| fixture.blocking_entered.load(Ordering::SeqCst));
     assert_eq!(bridge.stop(1), STOP_TIMED_OUT);
-    assert_eq!(bridge.start(vec![key]), BUSY);
+    assert_eq!(bridge.start(vec![key.clone()]), BUSY);
     *fixture.blocking_open.lock().unwrap() = true;
     fixture.blocking_changed.notify_all();
-    assert_eq!(bridge.stop(2000), 0);
+    until(|| bridge.status() == IDLE);
+    assert_eq!(bridge.stop(0), NOT_RUNNING);
     assert_eq!(fixture.drops.load(Ordering::SeqCst), 1);
+    assert_eq!(bridge.start(vec![key]), 0);
+    assert_eq!(fixture.builds.load(Ordering::SeqCst), 2);
+    assert_eq!(bridge.stop(2000), 0);
+    assert_eq!(fixture.drops.load(Ordering::SeqCst), 2);
 }
 
 #[test]
