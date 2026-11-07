@@ -1,10 +1,15 @@
-//! Root services, explicit initialization, and dependency declarations.
+//! Service entry points, initialization, and explicit dependency policy.
+//!
+//! A service owns its context and accepted [`WorkScope`]. Pass settings and resources
+//! through an ordinary constructor or closure; this module does not look them up.
 #![forbid(unsafe_code)]
 
 use crate::{
-    AppObserver, BoxError, Health, WorkScope,
-    cleanup::{CleanupId, CleanupRejected, Stack},
-    util::lock,
+    BoxError,
+    cleanup::{CleanupId, CleanupRejected, Registry},
+    observe::AppObserver,
+    report::Health,
+    work::WorkScope,
 };
 use std::{
     fmt,
@@ -15,114 +20,35 @@ use std::{
 use tokio::sync::Notify;
 use tokio_util::sync::CancellationToken;
 
-/// Stable name within one application instance.
-#[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd, Hash)]
-pub struct ServiceId(pub(crate) Arc<str>);
-
-impl ServiceId {
-    /// Service name supplied during assembly.
-    pub fn as_str(&self) -> &str {
-        &self.0
-    }
-}
-
-impl fmt::Display for ServiceId {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(&self.0)
-    }
-}
-
-/// Expected lifetime of a root.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum Lifetime {
-    /// Must remain alive until asked to stop.
-    Resident,
-    /// Completes after a finite operation and its child work.
-    Finite,
-}
-
-/// Failure propagation and readiness participation.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum Criticality {
-    /// Failure requests application shutdown; may provide dependencies.
-    Required,
-    /// Failure stops only this service; cannot be a dependency target.
-    Optional,
-}
-
-/// Validated by the application builder before anything starts.
-#[derive(Clone, Debug)]
-pub struct ServiceSpec {
-    pub(crate) id: ServiceId,
-    pub(crate) lifetime: Lifetime,
-    pub(crate) criticality: Criticality,
-    pub(crate) dependencies: Vec<String>,
-    pub(crate) max_work: usize,
-}
-
-impl ServiceSpec {
-    /// A required resident service with capacity for 1024 work responsibilities.
-    pub fn new(name: impl Into<String>) -> Self {
-        Self {
-            id: ServiceId(Arc::from(name.into())),
-            lifetime: Lifetime::Resident,
-            criticality: Criticality::Required,
-            dependencies: Vec::new(),
-            max_work: 1024,
-        }
-    }
-
-    /// Set expected lifetime.
-    #[must_use]
-    pub fn lifetime(mut self, value: Lifetime) -> Self {
-        self.lifetime = value;
-        self
-    }
-
-    /// Set failure propagation policy.
-    #[must_use]
-    pub fn criticality(mut self, value: Criticality) -> Self {
-        self.criticality = value;
-        self
-    }
-
-    /// Keep this provider alive until this service and all its work finish.
-    #[must_use]
-    pub fn depends_on(mut self, name: impl Into<String>) -> Self {
-        self.dependencies.push(name.into());
-        self
-    }
-
-    /// Bound accepted work, including unresolved aggregate responsibility.
-    #[must_use]
-    pub fn max_work(mut self, limit: NonZeroUsize) -> Self {
-        self.max_work = limit.get();
-        self
-    }
-}
-
-/// A once-owned application root; distinct from a Tower request service.
+/// A service entry point consumed once by an [`App`](crate::App).
 pub trait Service: Send + 'static {
-    /// Application error preserved across the supervision boundary.
+    /// Business or initialization failure retained in the final report.
     type Error: Into<BoxError> + Send + 'static;
 
-    /// Initialize, explicitly report readiness, and cooperatively finish on stop.
+    /// Initialize, report readiness, and run until the service's work is finished.
     fn run(self, context: ServiceContext) -> impl Future<Output = Result<(), Self::Error>> + Send;
 }
 
-/// Adapt a single-context asynchronous function, capturing dependencies explicitly.
-pub fn service_fn<F, Fut, E>(run: F) -> impl Service<Error = E>
+/// A function adapted to [`Service`], retaining its concrete error type.
+pub struct ServiceFn<F>(F);
+
+impl<F> fmt::Debug for ServiceFn<F> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("ServiceFn").finish_non_exhaustive()
+    }
+}
+
+/// Adapt a named function or closure whose error converts into [`BoxError`].
+pub fn service_fn<F, Fut, E>(run: F) -> ServiceFn<F>
 where
     F: FnOnce(ServiceContext) -> Fut + Send + 'static,
     Fut: Future<Output = Result<(), E>> + Send + 'static,
     E: Into<BoxError> + Send + 'static,
 {
-    Function(run)
+    ServiceFn(run)
 }
 
-struct Function<F>(F);
-
-impl<F, Fut, E> Service for Function<F>
+impl<F, Fut, E> Service for ServiceFn<F>
 where
     F: FnOnce(ServiceContext) -> Fut + Send + 'static,
     Fut: Future<Output = Result<(), E>> + Send + 'static,
@@ -135,106 +61,200 @@ where
     }
 }
 
-/// The root has finished or entered its stopping stage.
-#[derive(Clone, Copy, Debug, thiserror::Error)]
-#[error("service context is closed")]
-pub struct ContextClosed;
+/// A stable name within one application instance.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct ServiceId(pub(crate) Arc<str>);
 
-pub(crate) struct ContextState {
-    pub ready: bool,
-    pub health: Health,
-    pub finished: bool,
-    pub stopping: bool,
-    pub backend_unconfirmed: bool,
-    #[cfg(feature = "periodic")]
-    pub periodic: Option<crate::periodic::PeriodicSnapshot>,
-    pub execution_errors: u64,
-    pub recent_errors: std::collections::VecDeque<crate::SharedError>,
-    #[cfg(feature = "miju")]
-    pub recent_limit: usize,
+impl ServiceId {
+    /// The registered name.
+    pub fn name(&self) -> &str {
+        &self.0
+    }
 }
 
-impl fmt::Debug for ContextState {
+impl fmt::Display for ServiceId {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("ContextState")
-            .field("ready", &self.ready)
-            .field("health", &self.health)
-            .field("finished", &self.finished)
-            .field("stopping", &self.stopping)
-            .field("execution_errors", &self.execution_errors)
+        self.0.fmt(f)
+    }
+}
+
+/// Whether a fault stops the entire application or only this service.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Criticality {
+    /// Faults request application stop; only required services may be providers.
+    #[default]
+    Required,
+    /// Faults locally stop this service and degrade application health.
+    Optional,
+}
+
+/// The expected lifetime of a service root.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Lifetime {
+    /// Returning before stop is an unexpected exit.
+    #[default]
+    Resident,
+    /// Successful root and work completion initialize dependents.
+    Finite,
+}
+
+/// Advanced registration policy. A plain name supplies all defaults.
+#[derive(Clone, Debug)]
+pub struct ServiceSpec {
+    pub(crate) id: ServiceId,
+    pub(crate) criticality: Criticality,
+    pub(crate) lifetime: Lifetime,
+    pub(crate) dependencies: Vec<String>,
+    pub(crate) max_work: NonZeroUsize,
+}
+
+impl ServiceSpec {
+    /// Register a required resident with capacity for 1024 work responsibilities.
+    pub fn new(name: impl Into<String>) -> Self {
+        Self {
+            id: ServiceId(Arc::from(name.into())),
+            criticality: Criticality::Required,
+            lifetime: Lifetime::Resident,
+            dependencies: Vec::new(),
+            max_work: NonZeroUsize::new(1024).expect("1024 is nonzero"),
+        }
+    }
+
+    /// Choose whether this service is required for application operation.
+    #[must_use]
+    pub fn criticality(mut self, criticality: Criticality) -> Self {
+        self.criticality = criticality;
+        self
+    }
+
+    /// Choose a resident or finite root.
+    #[must_use]
+    pub fn lifetime(mut self, lifetime: Lifetime) -> Self {
+        self.lifetime = lifetime;
+        self
+    }
+
+    /// Require the named provider's initialization and retain it until this service drains.
+    #[must_use]
+    pub fn depends_on(mut self, provider: impl Into<String>) -> Self {
+        self.dependencies.push(provider.into());
+        self
+    }
+
+    /// Bound queued, running, and unconfirmed work together.
+    #[must_use]
+    pub fn max_work(mut self, capacity: NonZeroUsize) -> Self {
+        self.max_work = capacity;
+        self
+    }
+}
+
+impl From<&str> for ServiceSpec {
+    fn from(name: &str) -> Self {
+        Self::new(name)
+    }
+}
+
+impl From<String> for ServiceSpec {
+    fn from(name: String) -> Self {
+        Self::new(name)
+    }
+}
+
+pub(crate) struct ContextState {
+    pub(crate) initialized: bool,
+    pub(crate) health: Health,
+    pub(crate) declared_health: bool,
+    pub(crate) root_released: bool,
+}
+
+pub(crate) struct ContextShared {
+    pub(crate) state: Mutex<ContextState>,
+    pub(crate) stop: CancellationToken,
+    pub(crate) changed: Arc<Notify>,
+}
+
+/// Readiness, local stop, work ownership, and initialization cleanup for one service.
+#[derive(Clone)]
+pub struct ServiceContext {
+    pub(crate) id: ServiceId,
+    pub(crate) shared: Arc<ContextShared>,
+    pub(crate) work: WorkScope,
+    pub(crate) observer: AppObserver,
+    pub(crate) cleanup: Arc<Registry>,
+}
+
+impl fmt::Debug for ServiceContext {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("ServiceContext")
+            .field("id", &self.id)
             .finish_non_exhaustive()
     }
 }
 
-/// Initialization reporting and owned work for a single root.
-#[derive(Clone, Debug)]
-pub struct ServiceContext {
-    pub(crate) id: ServiceId,
-    pub(crate) state: Arc<Mutex<ContextState>>,
-    pub(crate) stop: CancellationToken,
-    pub(crate) scope: WorkScope,
-    pub(crate) cleanup: Arc<Stack>,
-    pub(crate) observer: AppObserver,
-    pub(crate) notify: Arc<Notify>,
-}
-
 impl ServiceContext {
-    /// Root identity.
+    /// This service's identity.
     pub fn id(&self) -> &ServiceId {
         &self.id
     }
 
-    /// Read-only application observation; does not retain a control lease.
+    /// Observe the application without keeping a control lease alive.
     pub fn observer(&self) -> AppObserver {
         self.observer.clone()
     }
 
-    /// Latch initialization; reject late calls after stopping or root release.
-    pub fn ready(&self) -> Result<(), ContextClosed> {
-        let mut state = lock(&self.state);
-        if state.finished || state.stopping || self.scope.is_stopping() {
-            return Err(ContextClosed);
+    /// Confirm real initialization; use Healthy unless health was explicitly declared.
+    ///
+    /// Repeated calls are harmless. Notifications after local stop or root release
+    /// are ignored, including normal stop races during initialization.
+    pub fn ready(&self) {
+        let mut state = self.shared.state.lock().unwrap();
+        if self.shared.stop.is_cancelled() || state.root_released {
+            return;
         }
-        state.ready = true;
+        state.initialized = true;
+        if !state.declared_health {
+            state.health = Health::Healthy;
+        }
         drop(state);
-        self.notify.notify_one();
-        Ok(())
+        self.shared.changed.notify_waiters();
     }
 
-    /// Report current health without changing the initialization latch.
-    pub fn set_health(&self, health: Health) -> Result<(), ContextClosed> {
-        let mut state = lock(&self.state);
-        if state.finished || state.stopping || self.scope.is_stopping() {
-            return Err(ContextClosed);
+    /// Update current health without implicitly stopping or restarting services.
+    pub fn set_health(&self, health: Health) {
+        let mut state = self.shared.state.lock().unwrap();
+        if self.shared.stop.is_cancelled() || state.root_released {
+            return;
         }
+        state.declared_health = true;
         state.health = health;
         drop(state);
-        self.notify.notify_one();
-        Ok(())
+        self.shared.changed.notify_waiters();
     }
 
-    /// Whether this root's dependency-ordered stop stage has begun.
+    /// Whether local stop has been requested.
     pub fn is_stopping(&self) -> bool {
-        self.scope.is_stopping()
+        self.shared.stop.is_cancelled()
     }
 
-    /// Wait for this root's stop stage, not an unrelated provider's stage.
+    /// Wait for local stop; cancellation of this observation has no side effect.
     pub async fn stopping(&self) {
-        self.stop.cancelled().await;
+        self.shared.stop.cancelled().await;
     }
 
-    /// Scope for all dynamic work owned by this root.
+    /// Work admitted under this service's lifetime and capacity.
     pub fn work(&self) -> &WorkScope {
-        &self.scope
+        &self.work
     }
 
     /// Transfer cleanup during initialization, including interrupted initialization.
     ///
-    /// Rejection returns the original closure; callers must execute it or retain it.
+    /// After readiness or root release this returns the original closure. The
+    /// caller retains responsibility for rejected cleanup; no async close runs here.
     pub fn defer_cleanup<F, Fut, E>(
         &self,
         label: impl Into<String>,
-        cleanup: F,
+        close: F,
     ) -> Result<CleanupId, CleanupRejected<F>>
     where
         F: FnOnce() -> Fut + Send + 'static,
@@ -242,59 +262,13 @@ impl ServiceContext {
         E: Into<BoxError> + Send + 'static,
     {
         let label = label.into();
-        let state = lock(&self.state);
-        if state.finished || state.ready {
+        let state = self.shared.state.lock().unwrap();
+        if state.initialized || state.root_released {
             drop(state);
-            return Err(CleanupRejected { cleanup });
+            return Err(CleanupRejected::new(label, close));
         }
-        let id = self.cleanup.push(label, cleanup);
+        let result = self.cleanup.register(label, close);
         drop(state);
-        self.notify.notify_one();
-        Ok(id)
-    }
-
-    #[cfg(feature = "periodic")]
-    pub(crate) fn update_periodic(&self, snapshot: crate::periodic::PeriodicSnapshot) {
-        lock(&self.state).periodic = Some(snapshot);
-        self.notify.notify_one();
-    }
-
-    #[cfg(feature = "miju")]
-    pub(crate) fn backend_unconfirmed(&self, value: bool) {
-        lock(&self.state).backend_unconfirmed = value;
-        self.notify.notify_one();
-    }
-
-    #[cfg(feature = "miju")]
-    pub(crate) fn record_execution_error(&self, error: crate::SharedError) {
-        let removed = {
-            let mut state = lock(&self.state);
-            state.execution_errors = state.execution_errors.saturating_add(1);
-            if state.recent_limit == 0 {
-                Some(error)
-            } else {
-                state.recent_errors.push_back(error);
-                if state.recent_errors.len() > state.recent_limit {
-                    state.recent_errors.pop_front()
-                } else {
-                    None
-                }
-            }
-        };
-        drop(removed);
-        self.notify.notify_one();
-    }
-
-    pub(crate) fn begin_stop(&self) {
-        // Close admission before publishing the stage-specific stop notification.
-        self.scope.stop();
-        lock(&self.state).stopping = true;
-        self.stop.cancel();
-        self.notify.notify_one();
-    }
-
-    pub(crate) fn finish(&self) {
-        lock(&self.state).finished = true;
-        self.scope.close();
+        result
     }
 }

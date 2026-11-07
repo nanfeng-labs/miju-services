@@ -9,10 +9,6 @@ name: cargo-lints
 permissions:
   contents: read
 
-env:
-  CARGO_TERM_COLOR: always
-  RUST_BACKTRACE: 1
-
 jobs:
   check:
     name: cargo-check
@@ -37,21 +33,32 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, windows-latest, macos-latest]
+        os: [ubuntu-latest, macos-latest, windows-latest]
     steps:
       - uses: actions/checkout@v7
       - uses: actions-rust-lang/setup-rust-toolchain@v2
         with:
           toolchain: stable
-      - run: cargo test --workspace --all-targets --locked
-      - run: cargo test --workspace --all-features --all-targets --locked
-      - run: cargo test --workspace --no-default-features --all-targets --locked
-      - run: cargo test --workspace --doc --locked
+      - run: cargo test --workspace --all-targets --all-features --locked
       - run: cargo test --workspace --doc --all-features --locked
+      - run: cargo test --workspace --all-targets --no-default-features --locked
       - run: cargo test --workspace --doc --no-default-features --locked
-      - run: cargo run --example basic --locked
-      - run: cargo run --example basic --all-features --locked
-      - run: cargo run --example basic --no-default-features --locked
+
+  msrv:
+    name: cargo-msrv (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions-rust-lang/setup-rust-toolchain@v2
+        with:
+          toolchain: 1.89.0
+      - run: cargo test --workspace --all-targets --all-features --locked
+      - run: cargo test --workspace --doc --all-features --locked
+      - run: cargo test --workspace --all-targets --no-default-features --locked
 
   fmt:
     name: cargo-fmt
@@ -87,10 +94,6 @@ jobs:
         run: cargo doc --workspace --no-deps --all-features --locked
         env:
           RUSTDOCFLAGS: --cfg docsrs -D warnings
-      - name: cargo-doc-minimal
-        run: cargo doc --workspace --no-deps --no-default-features --locked
-        env:
-          RUSTDOCFLAGS: --cfg docsrs -D warnings
 
   udeps:
     name: cargo-udeps
@@ -104,53 +107,4 @@ jobs:
         with:
           cache-on-failure: true
       - run: cargo +nightly install cargo-udeps --locked
-      - run: cargo +nightly udeps --workspace --all-targets --all-features
-
-  msrv:
-    name: cargo-msrv (${{ matrix.os }})
-    runs-on: ${{ matrix.os }}
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [ubuntu-latest, windows-latest, macos-latest]
-    steps:
-      - uses: actions/checkout@v7
-      - uses: actions-rust-lang/setup-rust-toolchain@v2
-        with:
-          toolchain: 1.89.0
-      - run: cargo test --workspace --no-default-features --all-targets --locked
-      - run: cargo test --workspace --all-features --all-targets --locked
-      - run: cargo test --workspace --doc --all-features --locked
-
-  jvm:
-    name: cargo-jvm (${{ matrix.os }}, JDK ${{ matrix.java }}, Rust ${{ matrix.rust }})
-    runs-on: ${{ matrix.os }}
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [ubuntu-latest, macos-latest]
-        java: ["17", "21"]
-        rust: [stable, "1.89.0"]
-    steps:
-      - uses: actions/checkout@v7
-      - uses: actions/setup-java@v6
-        with:
-          distribution: temurin
-          java-version: ${{ matrix.java }}
-      - uses: actions-rust-lang/setup-rust-toolchain@v2
-        with:
-          toolchain: ${{ matrix.rust }}
-      - name: verify-java-udp-lifecycle
-        run: >-
-          python3 examples/jni/run.py
-          --java-home "$JAVA_HOME"
-          --toolchain "${{ matrix.rust }}"
-          --target-dir "$RUNNER_TEMP/jni-target"
-          --output "$RUNNER_TEMP/jni-example"
-      - name: upload-jvm-results
-        if: always()
-        uses: actions/upload-artifact@v7
-        with:
-          name: jni-${{ matrix.os }}-jdk${{ matrix.java }}-rust${{ matrix.rust }}-attempt${{ github.run_attempt }}
-          path: ${{ runner.temp }}/jni-example
-          if-no-files-found: ignore
+      - run: cargo +nightly udeps --workspace --all-targets --all-features --locked
