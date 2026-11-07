@@ -12,7 +12,7 @@
 
 `miju-services` is a Rust service foundation for [miju](https://github.com/nanfeng-labs/miju). It gives applications one place to assemble ordinary services and miju workers, observe readiness and health, and wait for actual work and resource cleanup. The application owns its Tokio runtime, business configuration, resources, and logging setup.
 
-This unpublished `0.2` checkout implements ordinary lifecycles, application configuration and resource assembly, real miju Worker/Monitor integration and direct periodic operations. The published `0.1.0-beta` has a different API. Other integrations follow in later batches.
+This unpublished `0.2` checkout implements ordinary lifecycles, application configuration and resource assembly, real miju Worker/Monitor integration and direct periodic operations, and protocol/embedded hosts. The published `0.1.0-beta` has a different API. Other integrations follow in later batches.
 
 ## Usage
 
@@ -203,6 +203,10 @@ The runtime must also have Tokio's time driver enabled. `start()` checks that a 
 
 ## Examples
 
+Protocols use the same App entry point. Supply a Router and register the example-local `HttpService::new(address, router)`. It reports ready after binding and waits for the framework, Router, request futures, and response bodies to release. WebSocket reserves a session before returning 101 and returns 503 at capacity; its upgrade callback also holds the HTTP release barrier until it transfers or drops the socket. Sessions use a bounded outgoing queue and a two-second close budget. UDP drops overload without queuing and drains accepted datagrams. Separately retained resources and detached tasks remain application responsibilities.
+
+Run `cargo run --example http` for `127.0.0.1:3000`, `websocket` for `ws://127.0.0.1:3001/ws`, or `udp` for UDP `127.0.0.1:4000`. Ctrl-C requests shutdown and waits for actual cleanup. Run `embedded_runtime` to observe Pending while retaining the runtime until completion. Protocol adapters live in `examples/support` and are not public library API.
+
 | Example | Focus |
 | --- | --- |
 | [basic](examples/basic.rs) | Register a function and run until Ctrl-C. |
@@ -217,6 +221,10 @@ The runtime must also have Tokio's time driver enabled. `start()` checks that a 
 | [periodic](examples/periodic.rs) | A period and one asynchronous operation, without a queue. |
 | [cron_worker](examples/cron_worker.rs) | Calendar scheduling directly through a miju-cron backend. |
 | [bounded_queue_rounds](examples/bounded_queue_rounds.rs) | Advanced bounded admission, overlap, final receipts, and queued-job cancellation. |
+| [http](examples/http.rs) | Supply business routes, bind before ready, and wait for actual release. |
+| [websocket](examples/websocket.rs) | Admit before 101, retain upgrade responsibility, and bound session close. |
+| [udp](examples/udp.rs) | Drop overload and drain accepted datagrams. |
+| [embedded_runtime](examples/embedded_runtime.rs) | Retain the runtime after Pending until cleanup actually completes. |
 
 ## Features and development
 
