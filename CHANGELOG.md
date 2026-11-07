@@ -2,25 +2,60 @@
 
 ## [Unreleased]
 
+- refactor(jni): assemble App with verified runtime ownership ([#14](https://github.com/nanfeng-labs/miju-services/pull/14))
 - refactor(examples): simplify protocol and embedded hosts ([#13](https://github.com/nanfeng-labs/miju-services/pull/13))
 - refactor(miju): simplify worker and periodic service integration ([#12](https://github.com/nanfeng-labs/miju-services/pull/12))
 - feat(examples): add typed configuration and resource assembly ([#11](https://github.com/nanfeng-labs/miju-services/pull/11))
 - refactor(core): simplify application assembly and lifecycle control ([#10](https://github.com/nanfeng-labs/miju-services/pull/10))
 
-The local 0.2.0-beta.1 refactor is unreleased and includes breaking Rust API changes.
+The `0.2.0-beta.1` refactor below is unreleased. Its Rust API and lifecycle
+semantics include breaking changes from `0.1.0-beta`.
 
-- Rename Application/ApplicationBuilder to App/AppBuilder and recover rejected starts with StartError::into_app().
-- Add name-based registration, service_fn, named cleanup and run_until for the ordinary application path.
-- Make ready() infallible; preserve explicit health and ignore late notifications after local stop or root release.
-- Make shutdown wait for actual completion; use shutdown_within for Complete/Pending observation.
-- Drain service-owned work before dependency release and LIFO cleanup; preserve finite-service fault and completion semantics.
-- Keep advanced policy, work and observation types in their responsibility modules.
-- Add typed defaults → explicit TOML → application environment → CLI configuration, source reporting, resource assembly and bootstrap rollback examples.
-- Add immutable per-round watch snapshots and retain the last settings after sender closure.
-- Add worker_from with a real published miju dependency and preserve Worker/Monitor execution ownership.
-- Restore independent miju/periodic defaults; demonstrate direct miju-cron and bounded queued rounds.
-- Rewrite HTTP/WebSocket/UDP and embedded-runtime mains around focused assembly and actual-release adapters.
+### Breaking changes
 
+- Rename `Application` and `ApplicationBuilder` to `App` and `AppBuilder`, and
+  `StartError::into_application()` to `StartError::into_app()`.
+- Make `ServiceContext::ready()` infallible and idempotent. It sets default
+  `Healthy` only when health has not been explicitly declared; notifications
+  after local shutdown or root release no longer change service state.
+- Change `AppHandle::shutdown()` to wait for actual completion and return a
+  classified result with an `ExitReport`. Use `shutdown_within()` for bounded
+  observation returning `Complete(report)` or `Pending(snapshot)`.
+- Rename the JNI factory trait from `jni::App` to `jni::AppFactory`, returning
+  the core `App`. The five-method Java ABI remains unchanged. Factory results
+  must be safe to abandon by synchronous drop; acquire resources that require
+  async cleanup inside admitted service initialization.
+- Move advanced service-policy, work, and observation types from root re-exports
+  to their respective modules.
+
+### Added
+
+- Add `App::run_until()` to observe service completion from startup, handle the
+  host stop source, and wait for cleanup while retaining errors and reports.
+- Add name-based service registration, `AppBuilder::service_fn()` and named
+  builder cleanup, plus direct snapshot, readiness, and wait methods on `AppHandle`.
+- Add `configured_app` with validated typed settings, defaults, explicit TOML,
+  application-prefixed environment variables, CLI overrides, per-field source
+  reporting, resource assembly, and bootstrap rollback.
+- Add `watched_settings` with immutable per-round snapshots and retention of
+  the last settings after the update sender closes.
+- Add `miju::worker_from()` to construct a real miju worker with its lifecycle
+  context, avoiding manual pairing in the common path.
+
+### Changed
+
+- Rewrite introductory, resource, managed-work, operational-host, protocol, and
+  embedded-runtime examples around focused assembly functions. Configuration,
+  resource construction, protocol adapters, and signal policy remain application-owned.
+- Use the published optional `miju` dependency for Worker/Monitor integration.
+  Retain independent `miju` and `periodic` features, the `miju + periodic` defaults,
+  direct miju-cron backends, and default-off JNI hosting.
+- Treat successful finite services as initialized only after their root and
+  owned work have actually drained, without an authoritative service failure.
+  Child errors configured only for recording remain observable without blocking
+  that success gate.
+- Package the JNI example with `Cargo.toml.in`; materialize its manifest only in
+  the selected output directory, with explicit UTF-8 handling for Unicode source paths.
 - ci(dependabot): cover the standalone JNI example ([#9](https://github.com/nanfeng-labs/miju-services/pull/9))
 
 ## [0.1.0-beta]

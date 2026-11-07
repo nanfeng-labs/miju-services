@@ -12,7 +12,7 @@
 
 `miju-services` 是建立在 [miju](https://github.com/nanfeng-labs/miju) 之上的 Rust 服务基座，集中装配普通服务与 miju worker，观察就绪和健康，并等待工作与资源实际收尾。Tokio 运行时、业务配置、资源构造和日志输出由应用负责。
 
-当前未发布的 `0.2` 工作区已实现普通生命周期、应用配置与资源装配示例、真实 miju Worker/Monitor 接入及直接周期操作、协议及嵌入宿主示例。已发布的 `0.1.0-beta` 使用另一套 API；其他集成在后续批次接入。
+当前未发布的 `0.2` 工作区包含普通生命周期、应用配置与资源示例、miju Worker/Monitor 接入、直接周期操作及协议示例。已发布的 `0.1.0-beta` 使用另一套 API。可选 JNI 使用 `AppFactory` 装配同一个 `App`；新输入的宿主验收单独记录。
 
 ## 使用
 
@@ -238,3 +238,9 @@ cargo clippy --all-targets --all-features --locked -- -D warnings
 ```
 
 CI 将编译、测试、格式、Clippy、文档及未使用依赖检查拆为独立 jobs，并配置 Linux/macOS/Windows 测试及 Rust 1.89 验证。工作流配置不表示托管任务已经运行通过。
+
+## JNI 宿主
+
+普通 Rust 应用继续拥有 Tokio runtime。启用默认关闭的 `jni` feature 后，工厂实现 `jni::AppFactory` 并返回未启动 `App`，通过一次 `jni::export!` 导出五个 Java 静态方法。JNI owner 为每代应用持有自己的 runtime，等待工作、清理及用户引用实际释放后才允许下一代；Java stop 超时只结束该次观察。
+
+工厂返回的未启动 App 必须可安全同步析构。需要异步关闭的资源在服务初始化中取得，并在 ready 前登记清理；builder cleanup 不代替启动前回滚。完整的 Rust 装配、Java bridge 与真实 UDP 调用见 [JNI 示例](examples/jni/README.md)。
