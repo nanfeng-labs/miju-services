@@ -63,11 +63,11 @@ A Rust service foundation built on [miju](https://github.com/nanfeng-labs/miju).
 
 Requires **Rust 1.89+** and a Tokio runtime with time enabled.
 
-The examples below use the `0.2.0-beta.1` API. For breaking changes from `0.1.0-beta`, see the [changelog](https://github.com/nanfeng-labs/miju-services/blob/v0.2.0-beta.1/CHANGELOG.md).
+The examples below use the `0.2.0-beta.2` API. For migration notes from earlier betas, see the [changelog](https://github.com/nanfeng-labs/miju-services/blob/v0.2.0-beta.2/CHANGELOG.md).
 
 ```toml
 [dependencies]
-miju-services = "0.2.0-beta.1"
+miju-services = "0.2.0-beta.2"
 tokio = { version = "1", features = ["rt", "time", "sync", "macros", "signal"] }
 ```
 

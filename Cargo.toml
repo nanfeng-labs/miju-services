@@ -1,6 +1,6 @@
 [package]
 name = "miju-services"
-version = "0.2.0-beta.1"
+version = "0.2.0-beta.2"
 edition = "2024"
 rust-version = "1.89"
 license = "MIT"
