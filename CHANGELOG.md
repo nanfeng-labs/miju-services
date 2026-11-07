@@ -2,6 +2,7 @@
 
 ## [Unreleased]
 
+- refactor(examples): simplify protocol and embedded hosts ([#13](https://github.com/nanfeng-labs/miju-services/pull/13))
 - refactor(miju): simplify worker and periodic service integration ([#12](https://github.com/nanfeng-labs/miju-services/pull/12))
 - feat(examples): add typed configuration and resource assembly ([#11](https://github.com/nanfeng-labs/miju-services/pull/11))
 - refactor(core): simplify application assembly and lifecycle control ([#10](https://github.com/nanfeng-labs/miju-services/pull/10))
@@ -18,6 +19,7 @@ The local 0.2.0-beta.1 refactor is unreleased and includes breaking Rust API cha
 - Add immutable per-round watch snapshots and retain the last settings after sender closure.
 - Add worker_from with a real published miju dependency and preserve Worker/Monitor execution ownership.
 - Restore independent miju/periodic defaults; demonstrate direct miju-cron and bounded queued rounds.
+- Rewrite HTTP/WebSocket/UDP and embedded-runtime mains around focused assembly and actual-release adapters.
 
 - ci(dependabot): cover the standalone JNI example ([#9](https://github.com/nanfeng-labs/miju-services/pull/9))
 

@@ -12,7 +12,7 @@
 
 `miju-services` 是建立在 [miju](https://github.com/nanfeng-labs/miju) 之上的 Rust 服务基座，集中装配普通服务与 miju worker，观察就绪和健康，并等待工作与资源实际收尾。Tokio 运行时、业务配置、资源构造和日志输出由应用负责。
 
-当前未发布的 `0.2` 工作区已实现普通生命周期、应用配置与资源装配示例、真实 miju Worker/Monitor 接入及直接周期操作。已发布的 `0.1.0-beta` 使用另一套 API；其他集成在后续批次接入。
+当前未发布的 `0.2` 工作区已实现普通生命周期、应用配置与资源装配示例、真实 miju Worker/Monitor 接入及直接周期操作、协议及嵌入宿主示例。已发布的 `0.1.0-beta` 使用另一套 API；其他集成在后续批次接入。
 
 ## 使用
 
@@ -203,6 +203,10 @@ assert!(report.is_success());
 
 ## 示例
 
+协议沿用同一个 App 入口。HTTP 只需提供 Router，再注册示例内的 `HttpService::new(address, router)`；它在 bind 后确认 ready，停止后等待框架及 Router、请求 future 和响应 body 实际释放。WebSocket 在返回 101 前接纳会话，满载返回 503；升级回调的 socket 转交或释放也进入 HTTP 屏障。会话使用有界出站队列与两秒关闭预算。UDP 满载丢弃、不排队，已接纳数据报参与排空。另行保留的资源和裸 spawn 仍由应用负责。
+
+`cargo run --example http` 监听 `127.0.0.1:3000`；`websocket` 为 `ws://127.0.0.1:3001/ws`；`udp` 为 UDP `127.0.0.1:4000`。Ctrl-C 请求停止并等待实际清理。`embedded_runtime` 可直接运行，展示 Pending 后保留 runtime 继续等待。协议适配器位于 `examples/support`，不是库公开 API。
+
 | 示例 | 重点 |
 | --- | --- |
 | [basic](examples/basic.rs) | 注册函数，运行至 Ctrl-C。 |
@@ -217,6 +221,10 @@ assert!(report.is_success());
 | [periodic](examples/periodic.rs) | 周期与一轮异步操作，无须队列。 |
 | [cron_worker](examples/cron_worker.rs) | 直接使用 miju-cron 日历 backend。 |
 | [bounded_queue_rounds](examples/bounded_queue_rounds.rs) | 高级有界接纳、重叠、最终回执及未取作业取消。 |
+| [http](examples/http.rs) | 提供业务 Router，bind 后就绪，等待实际释放。 |
+| [websocket](examples/websocket.rs) | 101 前接纳、升级释放屏障和有界会话关闭。 |
+| [udp](examples/udp.rs) | 满载丢弃与已接纳数据报排空。 |
+| [embedded_runtime](examples/embedded_runtime.rs) | Pending 后保留运行时，直到实际清理结束。 |
 
 ## Features 与开发
 
