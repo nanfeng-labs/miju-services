@@ -1,8 +1,7 @@
 use crate::settings::Settings;
 use miju_services::{Service, ServiceContext};
-use std::{io, path::Path, sync::Arc, time::Instant};
+use std::{io, sync::Arc, time::Instant};
 use tokio::{
-    fs::OpenOptions,
     io::{AsyncWrite, AsyncWriteExt, BufWriter},
     sync::Mutex,
 };
@@ -19,15 +18,6 @@ impl std::fmt::Debug for SampleFile {
 }
 
 impl SampleFile {
-    pub(crate) async fn open(path: &Path) -> io::Result<Self> {
-        let file = OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(path)
-            .await?;
-        Ok(Self::from_writer(file))
-    }
-
     // AsyncWrite also gives tests a real I/O error/pending boundary, without a
     // special failure mode in the service or lifecycle code.
     pub(crate) fn from_writer(writer: impl AsyncWrite + Unpin + Send + 'static) -> Self {

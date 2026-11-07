@@ -5,13 +5,15 @@ mod basic;
 #[path = "support/operational_host.rs"]
 mod operational_host;
 
-use miju_services::BoxError;
+use miju_services::{App, BoxError};
 use operational_host::HostOutcome;
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> Result<(), BoxError> {
     match operational_host::run(
-        basic::assemble()?,
+        App::builder()
+            .service_fn("heartbeat", basic::heartbeat)
+            .build()?,
         tokio::signal::ctrl_c(),
         tokio::signal::ctrl_c(),
     )

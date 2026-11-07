@@ -15,7 +15,9 @@ async fn main() -> Result<(), BoxError> {
         println!("{}", loaded.explain());
         return Ok(());
     }
-    let report = bootstrap::run(loaded.settings, tokio::signal::ctrl_c()).await?;
+    let report = bootstrap::assemble(loaded.settings)?
+        .run_until(tokio::signal::ctrl_c())
+        .await?;
     println!("{report:?}");
     Ok(())
 }

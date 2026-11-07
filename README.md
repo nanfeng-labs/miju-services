@@ -234,7 +234,7 @@ let app = App::builder()
 
 Before `start` succeeds, bootstrap owns rollback. Keep independent access to resources needed for rollback: dropping a builder or an unstarted `App` cannot run asynchronous cleanup. `StartError::into_app()` recovers an app rejected because no Tokio runtime is active. After acceptance, the driver owns registered cleanup, including partial initialization failures. The [shared resource example](examples/shared_resource.rs) includes that application boundary and a concrete `Service` implementation.
 
-For multiple configuration sources, see [configured_app](examples/configured_app/README.md). It loads Default → explicit TOML → application environment → CLI, explains the effective sources, then assembles a file-backed sampler. Settings are validated before opening resources. The separate [watch example](examples/watched_settings.rs) shows one immutable configuration snapshot per round. Both stay outside the library's normal dependency tree.
+For multiple configuration sources, see [configured_app](examples/configured_app/README.md). It loads Default → explicit TOML → application environment → CLI, explains the effective sources, then assembles a file-backed sampler. The service opens its output after start accepts and registers `defer_cleanup` before readiness, so an unstarted App has no file to roll back. The separate [watch example](examples/watched_settings.rs) shows one immutable configuration snapshot per round. Both stay outside the library's normal dependency tree.
 
 ### Readiness and health
 
@@ -249,6 +249,12 @@ Use `context.work().spawn(...)` or `spawn_blocking(...)` for background work. Ad
 Ordinary asynchronous work can be aborted after the shutdown grace period. Started blocking work must finish cooperatively. `WorkSpec::aggregate` covers external execution through an explicit completion contract: only a normal `Ok(())` confirms completion; an error or panic leaves external responsibility unconfirmed. Do not use it for an ordinary task.
 
 Grace expiry requests eligible aborts. It does not prove completion or allow cleanup to overtake work. A pending blocking operation, unconfirmed external work, or unfinished cleanup keeps the driver alive and prevents a final report.
+
+`run_until()` and `shutdown()` wait without a deadline. For bounded observation, use `start()` followed by `shutdown_within(duration)`; `Pending` reports unfinished responsibility. Keep the runtime alive to continue waiting, or choose an explicit process-exit policy such as [operational_host](examples/operational_host.rs). A timeout does not release resources or produce a final report.
+
+The stop grace is shared from the first application stop request. A provider receives only the time left after its consumers drain, possibly no cooperative turn before abort. Put required asynchronous teardown in registered cleanup rather than relying on the provider root's stopping branch.
+
+Snapshots are observations supplied by the driver. Read `ServiceSnapshot` fields directly or destructure with `..`, so another dependency enabling an adapter feature does not break your pattern.
 
 ### Embedded control
 

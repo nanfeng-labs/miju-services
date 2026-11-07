@@ -1,15 +1,17 @@
 # Configured application
 
-This application loads two settings, opens an append-only output file, and passes them directly to a service constructor. `App` owns the service lifecycle and the registered close action. Configuration loading and resource construction remain application code.
+This application loads two settings and registers a sampler. After start accepts, service initialization opens an append-only output file through owned blocking work, registers its close action, and passes the settings and file to the sampler constructor. Configuration loading and resource construction remain application code.
 
 ```text
 Default → selected TOML → SAMPLER_ environment → CLI
                          ↓
                 validated Settings
                          ↓
-           open output → assemble App
+                    assemble App
                          ↓
-          run until Ctrl-C → drain → flush/close
+           start → open output → ready
+                         ↓
+           Ctrl-C → drain → flush/close
 ```
 
 ## Run
@@ -36,14 +38,18 @@ Output paths are relative to the process working directory, including paths read
 
 ## Composition and responsibility
 
-- [main.rs](main.rs) parses application input, optionally explains it, and runs the bootstrap.
+- [main.rs](main.rs) parses application input, optionally explains it, and runs the assembled App.
 - [settings.rs](settings.rs) merges through `config`, validates the result, and reads the effective origins from the same merged values. It does not infer provenance by repeating the merge.
-- [bootstrap.rs](bootstrap.rs) opens the output and visibly registers its cleanup and the sampler in one App. It retains independent rollback access until start accepts.
+- [bootstrap.rs](bootstrap.rs) shows the App builder and initialization: open the output, transfer its cleanup, then run the sampler.
 - [services.rs](services.rs) contains the output resource and the sampling service, receiving settings and an `Arc` through its constructor.
 
-Bootstrap chooses rollback after build/start refusal and retains the original error plus any rollback error. Do not retry the rejected App after that rollback. A host choosing recovery instead uses `StartError::into_app()` and keeps the resource open for the retry. Once start accepts, the lifecycle driver owns cleanup; bootstrap does not close it a second time.
+The normal path acquires no file before start accepts, so build/start refusal needs no asynchronous resource rollback. An open failure becomes a service failure in the final report. A stop before initialization never opens the output.
 
-Resources acquired inside service initialization instead use `context.defer_cleanup` before `ready()`. If registration is rejected, recover the closure with `into_inner()` and retain or execute its close responsibility. This example's tests exercise partial initialization failure, initialization-time cleanup followed by assembly-time cleanup, and interrupted or failed close using the same output implementation. The introductory main has no failure switches or test setup.
+Initialization uses `context.defer_cleanup` before `ready()`, including when stop arrives during acquisition. If registration is rejected, the application recovers the closure with `into_inner()` and executes it. Once accepted, cleanup belongs to the driver, including after service failure.
+
+The file open uses `context.work().spawn_blocking` and transfers its result through a one-shot channel. Cancellation can stop a queued factory; an operation that already started remains owned until it returns. Cancellation before acquisition is normal stopping, while a delivered I/O error remains a service failure even after stop. This also prevents a cancelled Tokio filesystem waiter from leaving an untracked open behind the final report.
+
+Use preconstructed resources when the application needs to share an existing resource before startup; the [shared resource example](../shared_resource.rs) demonstrates that separate boundary. It requires independent rollback access until start accepts. The [preconstructed-resource test fixture](../../tests/support/configured_prebuilt.rs) retains the earlier file rollback path, including original and rollback errors, while the normal example avoids that bookkeeping.
 
 The output's `close` action takes its writer, flushes it, and releases it before returning. A second close attempt is an error; it cannot certify another still-pending close. Cleanup is registered once. A slow flush keeps the App driver responsible even after a bounded shutdown observation returns `Pending`.
 
@@ -53,4 +59,4 @@ Logging is a separate application choice. If bootstrap installs a subscriber or 
 
 [watched_settings](../watched_settings.rs) is a separate small example using `watch::Receiver<Arc<Settings>>`: one round retains one immutable snapshot and the next reads the latest value. Updates can coalesce. Sender closure retains the last settings until normal service stop, and a notification does not certify that the service applied the value. No file watcher or reload framework is provided.
 
-The same composition and ownership paths are tested in [configured_app.rs](../../tests/configured_app.rs), source precedence in [configuration.rs](../../tests/configuration.rs), and runtime updates in [watched_settings.rs](../../tests/watched_settings.rs).
+The actual configured assembly, pre-start resource absence, initialization errors, file flush and preconstructed rollback paths are tested in [configured_app.rs](../../tests/configured_app.rs), source precedence in [configuration.rs](../../tests/configuration.rs), and runtime updates in [watched_settings.rs](../../tests/watched_settings.rs).
