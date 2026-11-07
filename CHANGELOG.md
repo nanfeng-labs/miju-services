@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+## [0.2.0-beta.1]
+
+- bump: to v0.2.0-beta.1 ([#16](https://github.com/nanfeng-labs/miju-services/pull/16))
+
 - docs(readme): restore branding and align bilingual guides with miju ([#15](https://github.com/nanfeng-labs/miju-services/pull/15))
 
 - refactor(jni): assemble App with verified runtime ownership ([#14](https://github.com/nanfeng-labs/miju-services/pull/14))
@@ -10,8 +14,7 @@
 - feat(examples): add typed configuration and resource assembly ([#11](https://github.com/nanfeng-labs/miju-services/pull/11))
 - refactor(core): simplify application assembly and lifecycle control ([#10](https://github.com/nanfeng-labs/miju-services/pull/10))
 
-The `0.2.0-beta.1` refactor below is unreleased. Its Rust API and lifecycle
-semantics include breaking changes from `0.1.0-beta`.
+This release includes breaking Rust API and lifecycle changes from `0.1.0-beta`.
 
 ### Breaking changes
 
