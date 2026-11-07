@@ -99,6 +99,12 @@ impl Root {
     fn snapshot(&self) -> ServiceSnapshot {
         let initialized = self.initialized();
         let state = self.context.shared.state.lock().unwrap();
+        #[cfg(feature = "periodic")]
+        let periodic = state.periodic.clone();
+        #[cfg(feature = "miju")]
+        let execution_errors = state.execution_errors;
+        #[cfg(feature = "miju")]
+        let recent_execution_errors = state.recent_execution_errors.iter().cloned().collect();
         let health = if self.spec.lifetime == Lifetime::Finite && initialized {
             Health::Healthy
         } else {
@@ -129,6 +135,12 @@ impl Root {
             ServicePhase::Starting
         };
         ServiceSnapshot {
+            #[cfg(feature = "periodic")]
+            periodic,
+            #[cfg(feature = "miju")]
+            execution_errors,
+            #[cfg(feature = "miju")]
+            recent_execution_errors,
             id: self.spec.id.clone(),
             criticality: self.spec.criticality,
             lifetime: self.spec.lifetime,
@@ -188,9 +200,17 @@ impl Driver {
                             health: Health::Unknown,
                             declared_health: false,
                             root_released: false,
+                            #[cfg(feature = "periodic")]
+                            periodic: None,
+                            #[cfg(feature = "miju")]
+                            execution_errors: 0,
+                            #[cfg(feature = "miju")]
+                            recent_execution_errors: Default::default(),
                         }),
                         stop: CancellationToken::new(),
                         changed: observer.shared.wake.clone(),
+                        #[cfg(feature = "miju")]
+                        history_limit: options.recent_results,
                     }),
                     work: WorkScope::new(
                         entry.spec.id.clone(),

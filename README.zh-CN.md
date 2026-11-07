@@ -10,9 +10,9 @@
   <a href="LICENSE">MIT</a> · Rust 1.89+
 </p>
 
-`miju-services` 是建立在 [miju](https://github.com/nanfeng-labs/miju) 之上的 Rust 服务基座，集中装配普通服务，观察就绪和健康，并等待工作与资源实际收尾。Tokio 运行时、业务配置、资源构造和日志输出由应用负责。
+`miju-services` 是建立在 [miju](https://github.com/nanfeng-labs/miju) 之上的 Rust 服务基座，集中装配普通服务与 miju worker，观察就绪和健康，并等待工作与资源实际收尾。Tokio 运行时、业务配置、资源构造和日志输出由应用负责。
 
-当前未发布的 `0.2` 工作区已实现普通生命周期、应用配置与资源装配示例。已发布的 `0.1.0-beta` 使用另一套 API；其他集成在后续批次接入。
+当前未发布的 `0.2` 工作区已实现普通生命周期、应用配置与资源装配示例、真实 miju Worker/Monitor 接入及直接周期操作。已发布的 `0.1.0-beta` 使用另一套 API；其他集成在后续批次接入。
 
 ## 使用
 
@@ -56,6 +56,56 @@ tokio = { version = "1", features = ["rt", "time", "sync", "macros", "signal"] }
 ```
 
 库不安装信号处理器。示例应用自行启用 Tokio `signal` feature；使用多线程 `#[tokio::main]` 时，还需启用 `rt-multi-thread`。
+
+## miju 与周期操作
+
+miju 继续负责 backend、middleware、作业函数及重试。`worker_from` 的工厂取得与生命周期控制共用的 context：
+
+```rust,no_run
+# #[cfg(feature = "miju")]
+# async fn worker_example() -> Result<(), miju_services::BoxError> {
+use miju::prelude::{MemoryStorage, WorkerBuilder};
+use miju_services::{App, miju::worker_from};
+
+let jobs = MemoryStorage::new();
+App::builder()
+    .service("devices", worker_from(move |context| {
+        WorkerBuilder::new(context)
+            .backend(jobs)
+            .build(|device: String| async move { println!("Read {device}"); })
+            .stream()
+    }))
+    .build()?
+    .run_until(tokio::signal::ctrl_c())
+    .await?;
+# Ok(())
+# }
+```
+
+工厂必须使用传入 context，不另建控制身份。Start 只确认 worker 驱动建立，不代表远端 backend 已就绪。停止后桥接继续驱动同一 stream；作业错误在快照中可见。backend 失败或 Monitor 重启历史会保留未确认的聚合责任，阻止错误地认证清理完成。Monitor 整体作为一个服务，内部 worker 故障可能被常驻兄弟延迟汇总。见 [worker](examples/miju_worker.rs) 与 [monitor](examples/miju_monitor.rs)。
+
+简单轮询只需要周期和一轮操作，不必使用队列：
+
+```rust
+# #[cfg(feature = "periodic")]
+# fn periodic_example() -> Result<(), miju_services::BoxError> {
+use miju_services::{App, periodic};
+use std::time::Duration;
+
+let app = App::builder()
+    .service("device-status", periodic::fixed_delay(Duration::from_secs(5), || async {
+        println!("Collect device status");
+        Ok(())
+    })?)
+    .build()?;
+# let _ = app;
+# Ok(())
+# }
+```
+
+`fixed_delay` 在完成后等待；`fixed_rate_skip` 使用固定时槽，跳过忙碌或错过的机会。若 0 秒开始、8 秒结束、周期 5 秒，下轮分别在 13 秒或 10 秒。默认立即首轮、串行执行，业务错误记录后继续下一周期，没有隐式重试。需要延迟首轮、具体错误、合作停止或失败升级时使用 `PeriodicRule` 与 `RoundContext`。
+
+[日历示例](examples/cron_worker.rs) 直接以 miju-cron 为 backend。[高级队列示例](examples/bounded_queue_rounds.rs) 在 miju 执行之外加入应用自己的接纳、目标重叠策略和最终回执：容量同时覆盖排队与执行；停止完成已取作业并取消未取作业；回执在完整重试链结束后发布。`MemoryStorage` 本身无界，worker 并发限制不等于积压上限。
 
 ## 核心概念
 
@@ -162,10 +212,15 @@ assert!(report.is_success());
 | [startup_failure](examples/startup_failure.rs) | 必要初始化失败，无须宿主信号即可退出。 |
 | [managed_work](examples/managed_work.rs) | 有限前置步骤及服务所属后台工作。 |
 | [operational_host](examples/operational_host.rs) | 从启动起观察故障，明确第二次信号策略。 |
+| [miju_worker](examples/miju_worker.rs) | 一次构造真实 miju worker 并管理其生命周期。 |
+| [miju_monitor](examples/miju_monitor.rs) | 按上游重启与聚合结果语义接入一组 worker。 |
+| [periodic](examples/periodic.rs) | 周期与一轮异步操作，无须队列。 |
+| [cron_worker](examples/cron_worker.rs) | 直接使用 miju-cron 日历 backend。 |
+| [bounded_queue_rounds](examples/bounded_queue_rounds.rs) | 高级有界接纳、重叠、最终回执及未取作业取消。 |
 
 ## Features 与开发
 
-当前默认 features 为空，普通生命周期可以独立使用。`tracing` 只发事件，`docsrs` 生成 feature 文档。信号处理由应用负责。
+默认 features 为 `miju` 和 `periodic`，两者也可单独启用。`default-features = false` 保留不依赖 miju 的完整普通生命周期。库关闭 miju 自身的默认 features，由应用选择 middleware。`tracing` 只发出生命周期事件，不安装 subscriber；`docsrs` 生成 feature 文档。配置、cron、队列辅助模块、协议及信号处理仍由应用选择。
 
 ```sh
 cargo test --all-targets --all-features --locked

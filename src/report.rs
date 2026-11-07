@@ -90,6 +90,15 @@ pub enum ServiceFailure {
 /// One service's latest state, also retained in the final report.
 #[derive(Clone, Debug)]
 pub struct ServiceSnapshot {
+    /// Periodic invocation counters when this service uses the periodic adapter.
+    #[cfg(feature = "periodic")]
+    pub periodic: Option<crate::periodic::PeriodicSnapshot>,
+    /// Nonfatal miju job errors observed, saturated at u64::MAX.
+    #[cfg(feature = "miju")]
+    pub execution_errors: u64,
+    /// Recent miju job errors with their original source chains.
+    #[cfg(feature = "miju")]
+    pub recent_execution_errors: Vec<SharedError>,
     /// Registered identity.
     pub id: ServiceId,
     /// Failure propagation policy.
