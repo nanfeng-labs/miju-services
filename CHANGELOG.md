@@ -2,6 +2,21 @@
 
 ## [Unreleased]
 
+## [0.2.0-beta.3]
+
+- bump: to v0.2.0-beta.3 ([#19](https://github.com/nanfeng-labs/miju-services/pull/19))
+
+### Fixed
+
+- Pin README example and language links to release source URLs so they work
+  when the README is rendered as crate documentation on docs.rs.
+
+### Documentation
+
+- Put the unbounded run_until wait and operational-host policy beside Usage.
+- Explain shared provider grace at stopping and depends_on, and distinguish
+  bounded observation from Tokio runtime destruction waiting for blocking work.
+
 ## [0.2.0-beta.2]
 
 - bump: to v0.2.0-beta.2 ([#18](https://github.com/nanfeng-labs/miju-services/pull/18))
