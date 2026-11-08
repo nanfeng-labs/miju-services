@@ -135,6 +135,9 @@ impl ServiceSpec {
     }
 
     /// Require the named provider's initialization and retain it until this service drains.
+    ///
+    /// Providers share the application's stop grace; dependency ordering does not
+    /// give each provider a new interval.
     #[must_use]
     pub fn depends_on(mut self, provider: impl Into<String>) -> Self {
         self.dependencies.push(provider.into());
@@ -267,6 +270,10 @@ impl ServiceContext {
     }
 
     /// Wait for local stop; cancellation of this observation has no side effect.
+    ///
+    /// A provider may have no cooperative turn left in the shared stop grace.
+    /// Register required asynchronous teardown during initialization with
+    /// [`defer_cleanup`](Self::defer_cleanup), rather than relying on this waiter resuming.
     pub async fn stopping(&self) {
         self.shared.stop.cancelled().await;
     }
