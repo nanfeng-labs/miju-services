@@ -27,7 +27,7 @@ tokio-util = { version = "0.7.20", features = ["rt"] }
 thiserror = "2.0.21"
 tracing = { version = "0.1.44", default-features = false, optional = true }
 document-features = { version = "0.2.12", optional = true }
-miju = { version = "0.2.0", default-features = false, optional = true }
+miju = { version = "0.2.1", default-features = false, optional = true }
 futures-util = { version = "0.3.34", default-features = false, features = ["std"], optional = true }
 
 jni = { version = "0.22.4", default-features = false, optional = true }
@@ -37,7 +37,7 @@ axum = { version = "0.8.9", default-features = false, features = ["tokio", "http
 http-body = "1.0.1"
 tokio-tungstenite = "0.30.0"
 futures-util = { version = "0.3.34", default-features = false, features = ["std", "sink"] }
-miju = { version = "0.2.0", default-features = false, features = ["retry"] }
+miju = { version = "0.2.1", default-features = false, features = ["retry"] }
 miju-cron = { version = "0.2.0", default-features = false, features = ["cron"] }
 cron = "0.17.0"
 tower = { version = "0.5.3", default-features = false, features = ["limit", "util"] }
