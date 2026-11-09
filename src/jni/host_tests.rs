@@ -31,6 +31,7 @@ struct Fixture {
     blocking_entered: AtomicBool,
     blocking_open: Mutex<bool>,
     blocking_changed: Condvar,
+    core_observer: Mutex<Option<(crate::observe::AppObserver, tokio::runtime::Handle)>>,
 }
 
 fn fixture() -> (String, Arc<Fixture>) {
@@ -48,6 +49,7 @@ fn fixture() -> (String, Arc<Fixture>) {
         blocking_entered: AtomicBool::new(false),
         blocking_open: Mutex::new(false),
         blocking_changed: Condvar::new(),
+        core_observer: Mutex::new(None),
     });
     FIXTURES
         .lock()
@@ -163,6 +165,19 @@ fn factory(args: Vec<String>) -> Result<App, BuildError> {
                             }
                             Ok::<(), BoxError>(())
                         })?;
+                }
+                if mode == "runtime-blocking" {
+                    *fixture.core_observer.lock().unwrap() =
+                        Some((context.observer(), tokio::runtime::Handle::current()));
+                    let blocking = fixture.clone();
+                    // Deliberately outside WorkScope: core drain must precede runtime release.
+                    tokio::task::spawn_blocking(move || {
+                        blocking.blocking_entered.store(true, Ordering::SeqCst);
+                        let mut open = blocking.blocking_open.lock().unwrap();
+                        while !*open {
+                            open = blocking.blocking_changed.wait(open).unwrap();
+                        }
+                    });
                 }
                 if mode == "unknown" {
                     context.set_health(Health::Unknown);
@@ -369,6 +384,72 @@ fn blocking_work_prevents_reuse_until_its_real_completion() {
     assert_eq!(fixture.builds.load(Ordering::SeqCst), 2);
     assert_eq!(bridge.stop(2000), 0);
     assert_eq!(fixture.drops.load(Ordering::SeqCst), 2);
+}
+
+#[test]
+fn runtime_destruction_after_core_drain_still_prevents_generation_reuse() {
+    struct Release(Arc<Fixture>);
+    impl Drop for Release {
+        fn drop(&mut self) {
+            *self.0.blocking_open.lock().unwrap() = true;
+            self.0.blocking_changed.notify_all();
+        }
+    }
+    let (key, fixture) = fixture();
+    let release = Release(fixture.clone());
+    let bridge = bridge(Duration::from_secs(2));
+    assert_eq!(
+        bridge.start(vec![key.clone(), "runtime-blocking".into()]),
+        0
+    );
+    until(|| fixture.blocking_entered.load(Ordering::SeqCst));
+    let (observer, owner_runtime) = fixture.core_observer.lock().unwrap().take().unwrap();
+    let stopped = bridge.stop(1);
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_time()
+        .build()
+        .unwrap();
+    let report = runtime.block_on(async {
+        tokio::time::timeout(Duration::from_secs(2), observer.wait())
+            .await
+            .expect("core did not drain independently of the raw blocking task")
+            .unwrap()
+    });
+    assert!(report.is_success());
+    assert_eq!(fixture.drops.load(Ordering::SeqCst), 1);
+    assert_eq!(fixture.assembly_drops.load(Ordering::SeqCst), 1);
+    assert!(!*fixture.blocking_open.lock().unwrap());
+    runtime.block_on(async {
+        tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                // Cancellation of a new task proves scheduler shutdown has begun.
+                if let Err(error) = owner_runtime.spawn(async {}).await {
+                    assert!(error.is_cancelled());
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("owner never reached runtime destruction after core drain");
+    });
+    assert_eq!(
+        stopped, STOP_TIMED_OUT,
+        "generation became reusable before runtime destruction returned"
+    );
+    let replacement = bridge.start(vec![key.clone()]);
+    if replacement != BUSY {
+        let _ = bridge.stop(2000);
+    }
+    assert_eq!(
+        replacement, BUSY,
+        "generation became reusable before runtime destruction returned"
+    );
+    assert_eq!(fixture.builds.load(Ordering::SeqCst), 1);
+    drop(release);
+    until(|| bridge.stop(0) == NOT_RUNNING);
+    assert_eq!(bridge.start(vec![key]), 0);
+    assert_eq!(bridge.stop(2000), 0);
 }
 
 #[test]

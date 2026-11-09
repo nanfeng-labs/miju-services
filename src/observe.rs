@@ -112,7 +112,7 @@ impl Shared {
         let old = std::mem::replace(&mut state.snapshot, snapshot.clone());
         let old_watch = self.updates.send_replace(snapshot.clone());
         drop(state);
-        drop((old, old_watch));
+        crate::task::retire((old, old_watch));
         snapshot
     }
 
@@ -240,5 +240,74 @@ impl SnapshotReceiver {
     pub async fn changed(&mut self) -> Option<Arc<AppSnapshot>> {
         self.receiver.changed().await.ok()?;
         Some(self.receiver.borrow_and_update().clone())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{
+        cleanup::{CleanupId, CleanupReport},
+        report::{Health, Phase},
+    };
+    use std::{
+        panic::{AssertUnwindSafe, catch_unwind},
+        sync::atomic::{AtomicUsize, Ordering},
+    };
+
+    #[derive(Debug)]
+    struct RetiredError(Arc<AtomicUsize>);
+
+    impl fmt::Display for RetiredError {
+        fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+            f.write_str("retired snapshot error")
+        }
+    }
+
+    impl std::error::Error for RetiredError {}
+
+    impl Drop for RetiredError {
+        fn drop(&mut self) {
+            self.0.fetch_add(1, Ordering::SeqCst);
+            panic!("retired-snapshot-drop");
+        }
+    }
+
+    fn snapshot() -> AppSnapshot {
+        AppSnapshot {
+            phase: Phase::Running,
+            ready: true,
+            health: Health::Healthy,
+            services: Vec::new(),
+            current_cleanup: None,
+            pending_cleanup: Vec::new(),
+            cleanup: Vec::new(),
+            budget_exceeded: false,
+            driver_lost: false,
+        }
+    }
+
+    #[test]
+    fn retiring_a_snapshot_error_does_not_unwind_publication() {
+        let drops = Arc::new(AtomicUsize::new(0));
+        let mut old = snapshot();
+        old.cleanup.push(CleanupReport {
+            id: CleanupId(1),
+            label: "retired".into(),
+            error: Some(Arc::new(RetiredError(drops.clone()))),
+            panic: None,
+            release_panic: None,
+        });
+        let shared = Shared::new(old, Arc::new(Notify::new()));
+        // Cloning the same snapshot during stop must retain its errors.
+        shared.stop();
+        assert_eq!(drops.load(Ordering::SeqCst), 0);
+        let published = catch_unwind(AssertUnwindSafe(|| shared.publish(snapshot())));
+        assert_eq!(drops.load(Ordering::SeqCst), 1);
+        assert!(
+            published.is_ok(),
+            "retired snapshot error escaped snapshot publication"
+        );
+        assert!(!shared.snapshot().driver_lost);
     }
 }

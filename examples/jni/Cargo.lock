@@ -143,7 +143,7 @@ dependencies = [
 
 [[package]]
 name = "miju-services"
-version = "0.2.0-beta.4"
+version = "0.2.0-beta.5"
 dependencies = [
  "jni",
  "thiserror",

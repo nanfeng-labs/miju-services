@@ -75,8 +75,62 @@ async fn delay_waits_after_completion_and_rate_skips_busy_slots() {
         assert_eq!(second.0, 2);
         assert_eq!(second.1.duration_since(origin).as_secs(), next);
         assert_eq!(second.2, second.1);
+        assert_eq!(
+            app.snapshot().services[0]
+                .periodic
+                .as_ref()
+                .unwrap()
+                .skipped,
+            u64::from(mode == PeriodicMode::FixedRateSkip)
+        );
         assert!(app.shutdown().await.unwrap().is_success());
     }
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_round_finishing_on_the_grid_can_start_the_next_slot_without_skipping() {
+    let origin = Instant::now();
+    let (send, mut receive) = mpsc::unbounded_channel();
+    let (release, finish) = oneshot::channel();
+    let mut finish = Some(finish);
+    let rule = PeriodicRule::new(Duration::from_secs(5), PeriodicMode::FixedRateSkip).unwrap();
+    let app = App::builder()
+        .service(
+            "sampler",
+            periodic::periodic(rule, move |round| {
+                let send = send.clone();
+                let finish = finish.take();
+                async move {
+                    send.send((round.round_id(), round.scheduled_at())).unwrap();
+                    if let Some(finish) = finish {
+                        finish.await.unwrap();
+                    }
+                    Ok::<(), BoxError>(())
+                }
+            }),
+        )
+        .build()
+        .unwrap()
+        .start()
+        .unwrap();
+    assert_eq!(receive.recv().await.unwrap(), (1, origin));
+    tokio::time::advance(Duration::from_secs(5)).await;
+    release.send(()).unwrap();
+    turn().await;
+    assert_eq!(
+        receive.try_recv().unwrap(),
+        (2, origin + Duration::from_secs(5))
+    );
+    assert!(receive.try_recv().is_err());
+    assert_eq!(
+        app.snapshot().services[0]
+            .periodic
+            .as_ref()
+            .unwrap()
+            .skipped,
+        0
+    );
+    assert!(app.shutdown().await.unwrap().is_success());
 }
 
 #[tokio::test(start_paused = true)]

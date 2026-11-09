@@ -747,6 +747,61 @@ fn start_error_is_send_sync_and_recovers_unstarted_app() {
 }
 
 #[test]
+fn runtime_loss_before_driver_poll_drops_captures_without_invoking_them() {
+    struct Capture(Arc<AtomicBool>);
+    impl Drop for Capture {
+        fn drop(&mut self) {
+            self.0.store(true, Ordering::SeqCst);
+        }
+    }
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_time()
+        .build()
+        .unwrap();
+    let root_dropped = Arc::new(AtomicBool::new(false));
+    let cleanup_dropped = Arc::new(AtomicBool::new(false));
+    let root_capture = Capture(root_dropped.clone());
+    let cleanup_capture = Capture(cleanup_dropped.clone());
+    let called = Arc::new(AtomicBool::new(false));
+    let invocation = called.clone();
+    let cleanup_called = Arc::new(AtomicBool::new(false));
+    let close = cleanup_called.clone();
+    let app = App::builder()
+        .service_fn("unpolled", move |_| async move {
+            let _capture = root_capture;
+            invocation.store(true, Ordering::SeqCst);
+            Ok(())
+        })
+        .cleanup("unpolled", move || async move {
+            let _capture = cleanup_capture;
+            close.store(true, Ordering::SeqCst);
+            Ok(())
+        })
+        .build()
+        .unwrap();
+    let handle = {
+        let _entered = runtime.enter();
+        app.start().unwrap()
+    };
+    drop(runtime);
+    assert!(root_dropped.load(Ordering::SeqCst));
+    assert!(cleanup_dropped.load(Ordering::SeqCst));
+    assert!(!called.load(Ordering::SeqCst));
+    assert!(!cleanup_called.load(Ordering::SeqCst));
+    let observer = tokio::runtime::Builder::new_current_thread()
+        .enable_time()
+        .build()
+        .unwrap();
+    assert!(
+        observer
+            .block_on(handle.wait())
+            .unwrap_err()
+            .snapshot
+            .driver_lost
+    );
+}
+
+#[test]
 fn runtime_loss_wakes_current_and_future_observers_without_completion_certificate() {
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_time()

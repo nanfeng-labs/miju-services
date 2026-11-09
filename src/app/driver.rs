@@ -628,10 +628,145 @@ async fn sleep_to(deadline: Option<Instant>) {
 
 #[cfg(test)]
 mod tests {
-    use super::startup_deadline;
-    use crate::service::Lifetime;
-    use std::time::Duration;
-    use tokio::time::Instant;
+    use super::*;
+    use crate::App;
+    use std::{
+        sync::atomic::{AtomicBool, Ordering},
+        task::{Context, Waker},
+        time::Duration,
+    };
+    use tokio::{sync::Notify, time::Instant};
+
+    struct Capture(Arc<AtomicBool>);
+
+    impl Drop for Capture {
+        fn drop(&mut self) {
+            self.0.store(true, Ordering::SeqCst);
+        }
+    }
+
+    fn controlled_driver(app: App, runtime: &tokio::runtime::Runtime) -> Driver {
+        let observer = AppObserver {
+            shared: crate::observe::Shared::new(
+                AppSnapshot {
+                    phase: Phase::Starting,
+                    ready: false,
+                    health: Health::Unknown,
+                    services: Vec::new(),
+                    current_cleanup: None,
+                    pending_cleanup: Vec::new(),
+                    cleanup: Vec::new(),
+                    budget_exceeded: false,
+                    driver_lost: false,
+                },
+                Arc::new(Notify::new()),
+            ),
+        };
+        let cleanup = Arc::new(Registry::default());
+        for (label, close) in app.cleanup {
+            cleanup.register(label, close).unwrap();
+        }
+        Driver::new(
+            app.options,
+            app.services,
+            app.dependencies,
+            cleanup,
+            observer,
+            runtime.handle().clone(),
+        )
+    }
+
+    #[test]
+    fn runtime_loss_before_root_poll_runs_the_root_release_callback() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_time()
+            .build()
+            .unwrap();
+        let dropped = Arc::new(AtomicBool::new(false));
+        let capture = Capture(dropped.clone());
+        let called = Arc::new(AtomicBool::new(false));
+        let invocation = called.clone();
+        let app = App::builder()
+            .service_fn("root", move |_| async move {
+                let _capture = capture;
+                invocation.store(true, Ordering::SeqCst);
+                Ok(())
+            })
+            .build()
+            .unwrap();
+        let mut driver = controlled_driver(app, &runtime);
+        let root = &mut driver.roots[0];
+        let entry = root.entry.take().unwrap();
+        root.spawn(runtime.handle(), entry);
+        drop(runtime);
+        assert!(dropped.load(Ordering::SeqCst));
+        assert!(!called.load(Ordering::SeqCst));
+        assert!(root.context.shared.state.lock().unwrap().root_released);
+        assert!(root.context.work.is_drained());
+        assert!(matches!(
+            root.result.lock().unwrap().as_ref().unwrap().result.outcome,
+            TaskOutcome::CancelledBeforeStart
+        ));
+    }
+
+    #[test]
+    fn runtime_loss_before_cleanup_poll_releases_it_without_a_certificate() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_time()
+            .build()
+            .unwrap();
+        let dropped = Arc::new(AtomicBool::new(false));
+        let capture = Capture(dropped.clone());
+        let called = Arc::new(AtomicBool::new(false));
+        let invocation = called.clone();
+        let app = App::builder()
+            .service_fn(
+                ServiceSpec::new("finite").lifetime(Lifetime::Finite),
+                |_| async { Ok(()) },
+            )
+            .cleanup("not-polled", move || async move {
+                let _capture = capture;
+                invocation.store(true, Ordering::SeqCst);
+                Ok(())
+            })
+            .build()
+            .unwrap();
+        let mut driver = controlled_driver(app, &runtime);
+        let root = &mut driver.roots[0];
+        let entry = root.entry.take().unwrap();
+        root.spawn(runtime.handle(), entry);
+        runtime.block_on(root.context.work.wait());
+        assert!(root.drained());
+        let observer = driver.observer.clone();
+        let mut run = Box::pin(driver.run());
+        {
+            let _entered = runtime.enter();
+            assert!(
+                run.as_mut()
+                    .poll(&mut Context::from_waker(Waker::noop()))
+                    .is_pending()
+            );
+        }
+        assert_eq!(
+            observer.snapshot().current_cleanup.as_deref(),
+            Some("not-polled")
+        );
+        runtime.spawn(run);
+        drop(runtime);
+        assert!(dropped.load(Ordering::SeqCst));
+        assert!(!called.load(Ordering::SeqCst));
+        let other = tokio::runtime::Builder::new_current_thread()
+            .enable_time()
+            .build()
+            .unwrap();
+        assert!(
+            other
+                .block_on(observer.wait())
+                .unwrap_err()
+                .snapshot
+                .driver_lost
+        );
+    }
 
     #[test]
     fn startup_deadline_only_applies_to_resident_services() {

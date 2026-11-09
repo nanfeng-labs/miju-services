@@ -84,6 +84,16 @@ fn release<T>(value: T) -> Option<Arc<str>> {
         .map(panic_message)
 }
 
+pub(crate) fn retire<T>(value: T) {
+    // Historical values must not attach their destructor failure to a newer result.
+    let panic = release(value);
+    #[cfg(feature = "tracing")]
+    if let Some(message) = &panic {
+        tracing::warn!(panic = %message, "retired report destructor panicked");
+    }
+    drop(panic);
+}
+
 struct Execution {
     factory: Option<Factory>,
     future: Option<UserFuture>,

@@ -100,6 +100,16 @@ pub enum ServiceFailure {
 ///     id.name()
 /// }
 /// ```
+///
+/// External callers cannot construct a snapshot, including through struct update:
+///
+/// ```compile_fail,E0639
+/// use miju_services::report::ServiceSnapshot;
+///
+/// fn rebuild(snapshot: ServiceSnapshot) -> ServiceSnapshot {
+///     ServiceSnapshot { ..snapshot }
+/// }
+/// ```
 #[derive(Clone, Debug)]
 #[non_exhaustive]
 pub struct ServiceSnapshot {
