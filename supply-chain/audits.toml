@@ -1,4 +1,14 @@
 
 # cargo-vet audits file
 
-[audits]
+[[audits.miju]]
+who = "Codex (AI-assisted source review)"
+criteria = "safe-to-deploy"
+delta = "0.2.0 -> 0.2.1"
+notes = "Reviewed the published package delta against the release commit. Rust implementation sources are unchanged; updates are limited to package metadata, documentation or generated lockfiles, and internal miju dependency requirements moving to 0.2.1. No new runtime dependencies, build scripts or unsafe code. The 0.2.0 exemption remains the baseline; internal dependencies are reviewed separately."
+
+[[audits.miju-core]]
+who = "Codex (AI-assisted source review)"
+criteria = "safe-to-deploy"
+delta = "0.2.0 -> 0.2.1"
+notes = "Reviewed the published 0.2.0 to 0.2.1 source and manifest delta against the release commit. Runtime changes are confined to Monitor: retain an observed signal error outside the terminator future and yield with an explicit wake after successful restart. No public type, unsafe code, I/O boundary, or third-party dependency requirement changes. Reviewed regression tests for both changes and isolated restart ablations. The 0.2.0 exemption remains the baseline; dependencies require separate coverage."
