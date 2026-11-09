@@ -1,4 +1,6 @@
 //! Use a Monitor when its grouped restart and delayed failure semantics are intended.
+//! Restart history leaves cleanup unconfirmed; use separate worker services when
+//! each worker's failure must stop and drain independently.
 use miju::prelude::{MemoryStorage, Monitor, WorkerBuilder};
 use miju_services::{App, BoxError, miju::monitor};
 

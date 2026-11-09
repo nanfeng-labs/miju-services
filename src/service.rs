@@ -95,6 +95,9 @@ pub enum Lifetime {
     #[default]
     Resident,
     /// Successful root and work completion initialize dependents.
+    ///
+    /// `ready()` does not complete this gate, but still closes initialization
+    /// cleanup registration. Register cleanup before calling it, or omit it.
     Finite,
 }
 
@@ -221,7 +224,7 @@ impl ServiceContext {
             None
         };
         drop(state);
-        drop(evicted);
+        crate::task::retire(evicted);
         self.shared.changed.notify_waiters();
     }
 
@@ -306,5 +309,70 @@ impl ServiceContext {
         let result = self.cleanup.register(label, close);
         drop(state);
         result
+    }
+}
+
+#[cfg(all(test, feature = "miju"))]
+mod tests {
+    use super::*;
+    use std::{
+        panic::{AssertUnwindSafe, catch_unwind},
+        sync::atomic::{AtomicUsize, Ordering},
+        time::Duration,
+    };
+
+    #[derive(Debug)]
+    struct RetiredError(Arc<AtomicUsize>);
+
+    impl fmt::Display for RetiredError {
+        fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+            f.write_str("retired job error")
+        }
+    }
+
+    impl std::error::Error for RetiredError {}
+
+    impl Drop for RetiredError {
+        fn drop(&mut self) {
+            self.0.fetch_add(1, Ordering::SeqCst);
+            panic!("retired-job-error-drop");
+        }
+    }
+
+    #[tokio::test]
+    async fn retiring_a_job_error_keeps_the_service_and_latest_error() {
+        let (send, receive) = tokio::sync::oneshot::channel();
+        let app = crate::App::builder()
+            .options(crate::app::AppOptions {
+                recent_results: 1,
+                ..crate::app::AppOptions::default()
+            })
+            .service_fn("worker", move |context| async move {
+                send.send(context.clone()).unwrap();
+                context.ready();
+                context.stopping().await;
+                Ok(())
+            })
+            .build()
+            .unwrap()
+            .start()
+            .unwrap();
+        app.ready(Duration::from_secs(1)).await.unwrap();
+        let context = receive.await.unwrap();
+        let drops = Arc::new(AtomicUsize::new(0));
+        context.record_execution_error(Arc::new(RetiredError(drops.clone())));
+        // No await lets the driver take an extra snapshot owner of the old error.
+        let retired = catch_unwind(AssertUnwindSafe(|| {
+            context.record_execution_error(Arc::new(std::io::Error::other("latest-job")));
+        }));
+        assert_eq!(drops.load(Ordering::SeqCst), 1);
+        let report = app.shutdown().await.unwrap();
+        assert!(retired.is_ok(), "retired job error escaped its history");
+        assert!(report.is_success());
+        assert_eq!(report.snapshot.services[0].execution_errors, 2);
+        assert_eq!(
+            report.snapshot.services[0].recent_execution_errors[0].to_string(),
+            "latest-job"
+        );
     }
 }

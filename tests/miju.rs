@@ -417,7 +417,10 @@ async fn monitor_restart_success_cannot_clear_previous_unconfirmed_backend() {
     bounded(async {
         loop {
             let snapshot = app.snapshot();
-            if snapshot.services[0].work.unconfirmed != 0
+            if snapshot.services[0]
+                .failures
+                .iter()
+                .any(|failure| matches!(failure, miju_services::report::ServiceFailure::Work(_)))
                 || snapshot.phase == miju_services::report::Phase::Terminated
             {
                 break;
@@ -427,13 +430,37 @@ async fn monitor_restart_success_cannot_clear_previous_unconfirmed_backend() {
     })
     .await;
     assert_eq!(generations.load(Ordering::SeqCst), 2);
-    assert!(
-        matches!(
-            app.shutdown_within(Duration::ZERO).await.unwrap(),
-            ShutdownProgress::Pending(_)
-        ),
-        "restart success falsely certified previous backend cleanup"
-    );
+    let ShutdownProgress::Pending(snapshot) = app.shutdown_within(Duration::ZERO).await.unwrap()
+    else {
+        panic!("restart success falsely certified previous backend cleanup");
+    };
+    assert_eq!(snapshot.services[0].work.unconfirmed, 1);
+    assert!(snapshot.services[0].failures.iter().any(|failure| {
+        matches!(failure, miju_services::report::ServiceFailure::Work(report)
+            if report.completion() == miju_services::work::WorkCompletion::Unconfirmed)
+    }));
+}
+
+#[tokio::test]
+async fn monitor_shutdown_before_its_run_is_polled_stays_effective() {
+    let calls = Arc::new(AtomicUsize::new(0));
+    let invoked = calls.clone();
+    let group = Monitor::new().register(move |_| {
+        WorkerBuilder::new("not-yet-polled")
+            .backend(miju::prelude::MemoryStorage::<u32>::new())
+            .build({
+                let invoked = invoked.clone();
+                move |_: u32| {
+                    invoked.fetch_add(1, Ordering::SeqCst);
+                    async {}
+                }
+            })
+    });
+    let control = group.context();
+    let run = group.run();
+    control.shutdown().unwrap();
+    bounded(run).await.unwrap();
+    assert_eq!(calls.load(Ordering::SeqCst), 0);
 }
 
 #[tokio::test]

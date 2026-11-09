@@ -149,6 +149,75 @@ impl Drop for Released {
     }
 }
 
+#[test]
+fn runtime_loss_releases_started_and_unpolled_work_without_a_final_report() {
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_time()
+        .build()
+        .unwrap();
+    let (app, scope) = runtime.block_on(running(3));
+    let released: Vec<_> = (0..3).map(|_| Arc::new(AtomicBool::new(false))).collect();
+    let capture = Released(released[0].clone());
+    let started = runtime.block_on(async {
+        let (send, receive) = oneshot::channel();
+        let work = scope
+            .spawn(WorkSpec::new("started"), move |_| async move {
+                let _capture = capture;
+                send.send(()).unwrap();
+                std::future::pending::<()>().await;
+                Ok::<(), BoxError>(())
+            })
+            .unwrap();
+        receive.await.unwrap();
+        work
+    });
+    let called = Arc::new(AtomicBool::new(false));
+    let mut unpolled = Vec::new();
+    for (index, spec) in [
+        WorkSpec::new("unpolled"),
+        WorkSpec::aggregate("unpolled-aggregate"),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let called = called.clone();
+        let capture = Released(released[index + 1].clone());
+        unpolled.push(
+            scope
+                .spawn(spec, move |_| {
+                    called.store(true, Ordering::SeqCst);
+                    let _capture = capture;
+                    async { Ok::<(), BoxError>(()) }
+                })
+                .unwrap(),
+        );
+    }
+    drop(runtime);
+    assert!(!called.load(Ordering::SeqCst));
+    assert!(released.iter().all(|flag| flag.load(Ordering::SeqCst)));
+    let observer = tokio::runtime::Builder::new_current_thread()
+        .enable_time()
+        .build()
+        .unwrap();
+    observer.block_on(async {
+        let report = started.wait().await;
+        assert!(matches!(report.outcome(), WorkOutcome::Aborted));
+        assert_eq!(report.completion(), WorkCompletion::Confirmed);
+        for handle in unpolled {
+            let report = handle.wait().await;
+            assert!(matches!(
+                report.outcome(),
+                WorkOutcome::CancelledBeforeStart
+            ));
+            assert_eq!(report.completion(), WorkCompletion::Confirmed);
+        }
+        tokio::time::timeout(Duration::from_secs(1), scope.wait())
+            .await
+            .expect("runtime loss left a tracker token or entry behind");
+        assert!(app.wait().await.unwrap_err().snapshot.driver_lost);
+    });
+}
+
 #[tokio::test]
 async fn publication_follows_capture_release() {
     let (app, scope) = running(1).await;

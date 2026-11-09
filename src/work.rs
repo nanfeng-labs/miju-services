@@ -97,6 +97,9 @@ pub enum SpawnError {
     #[error("work capacity is exhausted")]
     AtCapacity,
     /// The runtime cannot accept this work.
+    ///
+    /// Reserved for runtime admission failures; currently not returned. Accepted
+    /// work uses the captured Tokio handle and reports cancellation through its handle.
     #[error("runtime is unavailable")]
     RuntimeUnavailable,
     /// Blocking work cannot certify aggregate completion.
@@ -527,7 +530,7 @@ impl WorkScope {
             (removed, evicted, report)
         };
         let previous = control.result.send_replace(Some(report));
-        drop((removed, evicted, previous));
+        task::retire((removed, evicted, previous));
     }
 
     /// Close admission without stopping already accepted work.
@@ -690,5 +693,160 @@ impl WorkHandle {
                 .await
                 .expect("the control retains its result sender");
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::AtomicUsize;
+    use std::task::Poll;
+    use tokio::sync::oneshot;
+
+    #[derive(Debug)]
+    struct RetiredError {
+        panic_on_drop: bool,
+        drops: Arc<AtomicUsize>,
+    }
+
+    impl fmt::Display for RetiredError {
+        fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+            f.write_str("recorded error with an observable destructor")
+        }
+    }
+
+    impl std::error::Error for RetiredError {}
+
+    impl Drop for RetiredError {
+        fn drop(&mut self) {
+            self.drops.fetch_add(1, Ordering::SeqCst);
+            assert!(!self.panic_on_drop, "recorded-error-drop-panic");
+        }
+    }
+
+    async fn scope_waiter_wakes_after_retirement(panic_on_drop: bool) -> bool {
+        // Construct the real scope directly, without an App snapshot retaining
+        // another Arc to the old report. Execution and finish use product code.
+        let scope = WorkScope::new(
+            ServiceId(Arc::from("scope")),
+            2,
+            1,
+            Handle::current(),
+            Arc::new(Notify::new()),
+            Arc::new(AtomicU64::new(0)),
+        );
+        let drops = Arc::new(AtomicUsize::new(0));
+        let error = RetiredError {
+            panic_on_drop,
+            drops: drops.clone(),
+        };
+        let first = scope
+            .spawn(WorkSpec::new("recorded-error"), move |_| async move {
+                Err::<(), BoxError>(Box::new(error))
+            })
+            .unwrap();
+        let report = first.wait().await;
+        assert!(matches!(report.outcome(), WorkOutcome::Failed(_)));
+        drop((first, report));
+        assert_eq!(drops.load(Ordering::SeqCst), 0);
+
+        let (finish, pending) = oneshot::channel();
+        let second = scope
+            .spawn(WorkSpec::new("evicts-previous"), move |_| async move {
+                pending.await?;
+                Ok::<(), BoxError>(())
+            })
+            .unwrap();
+        scope.close();
+        let wait = scope.wait();
+        tokio::pin!(wait);
+        assert!(
+            std::future::poll_fn(|cx| Poll::Ready(wait.as_mut().poll(cx)))
+                .await
+                .is_pending()
+        );
+        finish.send(()).unwrap();
+        let report = second.wait().await;
+        assert!(matches!(report.outcome(), WorkOutcome::Succeeded));
+        assert_eq!(drops.load(Ordering::SeqCst), 1);
+        assert!(scope.is_drained(), "responsibility has actually ended");
+        std::future::poll_fn(|cx| Poll::Ready(wait.as_mut().poll(cx)))
+            .await
+            .is_ready()
+    }
+
+    #[tokio::test]
+    async fn retired_error_panic_must_not_strand_a_registered_scope_waiter() {
+        assert!(
+            scope_waiter_wakes_after_retirement(false).await,
+            "baseline retirement did not notify"
+        );
+        assert!(
+            scope_waiter_wakes_after_retirement(true).await,
+            "recorded error destructor panic stranded the drained scope waiter"
+        );
+    }
+
+    #[test]
+    fn aborted_queued_blocking_work_releases_its_capture_during_runtime_shutdown() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_time()
+            .max_blocking_threads(1)
+            .build()
+            .unwrap();
+        let (entered, entry) = std::sync::mpsc::channel();
+        let (release, gate) = std::sync::mpsc::channel::<()>();
+        let blocker = runtime.spawn_blocking(move || {
+            entered.send(()).unwrap();
+            let _ = gate.recv();
+        });
+        entry
+            .recv_timeout(std::time::Duration::from_secs(1))
+            .unwrap();
+        let scope = WorkScope::new(
+            ServiceId(Arc::from("owner")),
+            1,
+            1,
+            runtime.handle().clone(),
+            Arc::new(Notify::new()),
+            Arc::new(AtomicU64::new(0)),
+        );
+        let called = Arc::new(AtomicBool::new(false));
+        let invocation = called.clone();
+        let drops = Arc::new(AtomicUsize::new(0));
+        let capture = RetiredError {
+            panic_on_drop: false,
+            drops: drops.clone(),
+        };
+        let work = scope
+            .spawn_blocking(WorkSpec::new("queued"), move |_| {
+                invocation.store(true, Ordering::SeqCst);
+                drop(capture);
+                Ok::<(), BoxError>(())
+            })
+            .unwrap();
+        scope.close();
+        scope.abort();
+        // Shutdown is established before the occupied blocking worker is released.
+        runtime.shutdown_timeout(std::time::Duration::ZERO);
+        drop(release);
+        let observer = tokio::runtime::Builder::new_current_thread()
+            .enable_time()
+            .build()
+            .unwrap();
+        observer.block_on(async {
+            blocker.await.unwrap();
+            let report = tokio::time::timeout(std::time::Duration::from_secs(1), work.wait())
+                .await
+                .unwrap();
+            assert!(matches!(
+                report.outcome(),
+                WorkOutcome::CancelledBeforeStart
+            ));
+            assert_eq!(report.completion(), WorkCompletion::Confirmed);
+            scope.wait().await;
+        });
+        assert!(!called.load(Ordering::SeqCst));
+        assert_eq!(drops.load(Ordering::SeqCst), 1);
     }
 }

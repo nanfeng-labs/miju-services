@@ -12,6 +12,7 @@ use websocket::WebSocketService;
 async fn main() -> Result<(), BoxError> {
     App::builder()
         .service(
+            // 64 sessions plus the HTTP server's aggregate responsibility.
             ServiceSpec::new("websocket").max_work(65.try_into()?),
             WebSocketService::new("127.0.0.1:3001".parse()?),
         )

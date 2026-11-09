@@ -2,6 +2,29 @@
 
 ## [Unreleased]
 
+## [0.2.0-beta.5]
+
+- bump: to v0.2.0-beta.5 ([#22](https://github.com/nanfeng-labs/miju-services/pull/22))
+
+### Fixed
+
+- Preserve final drain notifications when retiring an old error report unwinds.
+- Contain the same retired-error failure in job history and snapshot publication
+  without assigning an earlier error's destructor panic to a newer work result.
+
+### Validation
+
+- Add regression coverage for runtime loss before root and cleanup polling,
+  started and unpolled work, queued blocking cancellation, and JNI reuse after
+  core drain while runtime destruction is still pending.
+- Protect the non-exhaustive snapshot contract with a compile-fail doctest and
+  strengthen Monitor restart, pre-poll shutdown and periodic grid assertions.
+
+### Documentation
+
+- Clarify finite readiness, custom worker streams, Monitor restart limits and
+  WebSocket capacity. Pin the README artwork and license to this release.
+
 ## [0.2.0-beta.4]
 
 - bump: to v0.2.0-beta.4 ([#21](https://github.com/nanfeng-labs/miju-services/pull/21))

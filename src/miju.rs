@@ -20,6 +20,8 @@ use std::{fmt, sync::Arc};
 /// is a caller contract rather than a type-system guarantee. Start establishes
 /// the driver, not remote backend readiness. Job errors remain observable without
 /// failing the lifecycle. Use a Finite ServiceSpec for naturally finite sources.
+/// A custom wrapper must keep polling through Start; stop is forwarded afterward,
+/// because an upstream Pending context rejects stop. A stalled wrapper retains ownership.
 pub fn worker_from<F, S>(factory: F) -> impl Service<Error = BoxError>
 where
     F: FnOnce(WorkerContext) -> S + Send + 'static,
@@ -36,6 +38,8 @@ where
 ///
 /// Prefer [`worker_from`] to avoid pairing two separately constructed objects.
 /// Do not start or restart this context independently after attachment.
+/// The stream must emit Start and continue polling through stop and actual close.
+/// A custom stream stalled before Start cannot receive the forwarded stop.
 pub fn worker<S>(control: WorkerContext, events: S) -> impl Service<Error = BoxError>
 where
     S: Stream<Item = Result<Event, WorkerError>> + Send + 'static,
