@@ -2,6 +2,15 @@
 
 ## [Unreleased]
 
+## [0.2.0-beta.4]
+
+- bump: to v0.2.0-beta.4 ([#21](https://github.com/nanfeng-labs/miju-services/pull/21))
+
+### Changed
+
+- Require miju 0.2.1 when the `miju` feature is enabled, including the upstream
+  Monitor restart scheduling fix. Service APIs and lifecycle policy are unchanged.
+
 - deps: require miju 0.2.1 ([#20](https://github.com/nanfeng-labs/miju-services/pull/20))
 
 ## [0.2.0-beta.3]
