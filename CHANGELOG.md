@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+- deps: require miju 0.2.1 ([#20](https://github.com/nanfeng-labs/miju-services/pull/20))
+
 ## [0.2.0-beta.3]
 
 - bump: to v0.2.0-beta.3 ([#19](https://github.com/nanfeng-labs/miju-services/pull/19))
