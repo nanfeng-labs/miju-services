@@ -747,6 +747,48 @@ fn start_error_is_send_sync_and_recovers_unstarted_app() {
 }
 
 #[test]
+fn runtime_drop_can_start_blocking_work_that_was_still_queued() {
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_time()
+        .max_blocking_threads(1)
+        .build()
+        .unwrap();
+    let owner = runtime.handle().clone();
+    std::thread::scope(|threads| {
+        let (entered, entry) = std::sync::mpsc::channel();
+        let (release, gate) = std::sync::mpsc::channel::<()>();
+        runtime.spawn_blocking(move || {
+            entered.send(()).unwrap();
+            let _ = gate.recv();
+        });
+        entry.recv_timeout(Duration::from_secs(1)).unwrap();
+        let queued = runtime.spawn_blocking(|| 42);
+        let shutdown = threads.spawn(move || drop(runtime));
+        let observer = tokio::runtime::Builder::new_current_thread()
+            .enable_time()
+            .build()
+            .unwrap();
+        observer.block_on(async {
+            tokio::time::timeout(Duration::from_secs(2), async {
+                loop {
+                    if let Err(error) = owner.spawn(async {}).await {
+                        assert!(error.is_cancelled());
+                        break;
+                    }
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .expect("runtime shutdown never began");
+        });
+        assert!(!queued.is_finished(), "blocking work was not still queued");
+        drop(release);
+        shutdown.join().unwrap();
+        assert_eq!(observer.block_on(queued).unwrap(), 42);
+    });
+}
+
+#[test]
 fn runtime_loss_before_driver_poll_drops_captures_without_invoking_them() {
     struct Capture(Arc<AtomicBool>);
     impl Drop for Capture {

@@ -397,7 +397,14 @@ async fn stop_before_start_is_forwarded_after_the_actual_start_event() {
 async fn monitor_restart_success_cannot_clear_previous_unconfirmed_backend() {
     let generations = Arc::new(AtomicUsize::new(0));
     let created = generations.clone();
+    let restarted_exited = Arc::new(AtomicBool::new(false));
+    let observed = restarted_exited.clone();
     let group = Monitor::new()
+        .on_event(move |worker, event| {
+            if worker.restarts() == 1 && matches!(event, miju::prelude::Event::Exit) {
+                observed.store(true, Ordering::SeqCst);
+            }
+        })
         .should_restart(|context, _| context.restarts() == 0)
         .register(move |generation| {
             created.fetch_add(1, Ordering::SeqCst);
@@ -430,6 +437,10 @@ async fn monitor_restart_success_cannot_clear_previous_unconfirmed_backend() {
     })
     .await;
     assert_eq!(generations.load(Ordering::SeqCst), 2);
+    assert!(
+        restarted_exited.load(Ordering::SeqCst),
+        "restarted worker did not exit successfully"
+    );
     let ShutdownProgress::Pending(snapshot) = app.shutdown_within(Duration::ZERO).await.unwrap()
     else {
         panic!("restart success falsely certified previous backend cleanup");

@@ -486,7 +486,8 @@ impl AppHandle {
     /// Request stop and observe for a bounded interval; Pending retains responsibility.
     ///
     /// This does not bound Tokio runtime destruction: runtime drop can still wait
-    /// for started blocking work. The host owns its runtime and process-exit policy.
+    /// for blocking work that has started or is still queued and may start during
+    /// shutdown. The host owns its runtime and process-exit policy.
     pub async fn shutdown_within(&self, within: Duration) -> Result<ShutdownProgress, DriverLost> {
         self.stop();
         self.control.observer.drain(within).await

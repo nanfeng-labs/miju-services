@@ -435,7 +435,7 @@ fn runtime_destruction_after_core_drain_still_prevents_generation_reuse() {
     });
     assert_eq!(
         stopped, STOP_TIMED_OUT,
-        "generation became reusable before runtime destruction returned"
+        "stop observation completed before runtime destruction returned"
     );
     let replacement = bridge.start(vec![key.clone()]);
     if replacement != BUSY {
@@ -443,7 +443,7 @@ fn runtime_destruction_after_core_drain_still_prevents_generation_reuse() {
     }
     assert_eq!(
         replacement, BUSY,
-        "generation became reusable before runtime destruction returned"
+        "replacement start was admitted before runtime destruction returned"
     );
     assert_eq!(fixture.builds.load(Ordering::SeqCst), 1);
     drop(release);
