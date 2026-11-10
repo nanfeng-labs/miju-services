@@ -1,4 +1,4 @@
-<!-- Also rendered as crate documentation: keep file links absolute and pinned to this release. -->
+<!-- Also rendered as crate documentation: keep navigation file links absolute and pinned to this release. -->
 
 <p align="center">
   <img src="https://raw.githubusercontent.com/nanfeng-labs/miju-services/v0.2.0-beta.5/assets/miju-services-header.svg" alt="miju-services" width="560" />
@@ -25,7 +25,7 @@
   <a href="https://www.rust-lang.org/">
     <img src="https://img.shields.io/badge/MSRV-1.89-orange.svg?logo=rust" alt="Rust 1.89 or newer" />
   </a>
-  <a href="https://github.com/nanfeng-labs/miju-services/blob/v0.2.0-beta.5/LICENSE">
+  <a href="https://github.com/nanfeng-labs/miju-services/blob/v0.2.0-beta.6/LICENSE">
     <img src="https://img.shields.io/github/license/nanfeng-labs/miju-services" alt="MIT license" />
   </a>
 </div>
@@ -33,7 +33,7 @@
 <br />
 
 <div align="center">
-  English · <a href="https://github.com/nanfeng-labs/miju-services/blob/v0.2.0-beta.5/README.zh-CN.md">简体中文</a>
+  English · <a href="https://github.com/nanfeng-labs/miju-services/blob/v0.2.0-beta.6/README.zh-CN.md">简体中文</a>
 </div>
 
 <br />
@@ -65,11 +65,11 @@ A Rust service foundation built on [miju](https://github.com/nanfeng-labs/miju).
 
 Requires **Rust 1.89+** and a Tokio runtime with time enabled.
 
-The examples below use the `0.2.0-beta.5` API. For migration notes from earlier betas, see the [changelog](https://github.com/nanfeng-labs/miju-services/blob/v0.2.0-beta.5/CHANGELOG.md).
+The examples below use the `0.2.0-beta.6` API. For migration notes from earlier betas, see the [changelog](https://github.com/nanfeng-labs/miju-services/blob/v0.2.0-beta.6/CHANGELOG.md).
 
 ```toml
 [dependencies]
-miju-services = "0.2.0-beta.5"
+miju-services = "0.2.0-beta.6"
 tokio = { version = "1", features = ["rt", "time", "sync", "macros", "signal"] }
 ```
 
@@ -79,7 +79,7 @@ The library does not install signal handlers. The example application enables To
 
 Register a function, run until the host requests shutdown, and receive the final report.
 
-`run_until()` waits without a deadline for owned work and cleanup. For a process that needs an explicit second-signal exit policy, start from [operational_host](https://github.com/nanfeng-labs/miju-services/blob/v0.2.0-beta.5/examples/operational_host.rs). [embedded_runtime](https://github.com/nanfeng-labs/miju-services/blob/v0.2.0-beta.5/examples/embedded_runtime.rs) demonstrates bounded observation while retaining the runtime.
+`run_until()` waits without a deadline for owned work and cleanup. For a process that needs an explicit second-signal exit policy, start from [operational_host](https://github.com/nanfeng-labs/miju-services/blob/v0.2.0-beta.6/examples/operational_host.rs). [embedded_runtime](https://github.com/nanfeng-labs/miju-services/blob/v0.2.0-beta.6/examples/embedded_runtime.rs) demonstrates bounded observation while retaining the runtime.
 
 ```rust,no_run
 use miju_services::{App, BoxError, ServiceContext};
@@ -135,7 +135,7 @@ App::builder()
 # }
 ```
 
-Use the supplied context, rather than creating another worker context. Start establishes the worker driver, not remote backend readiness. The bridge keeps polling the original stream after stop; job errors remain observable in snapshots. Backend failure or Monitor restart history leaves aggregate responsibility unconfirmed and prevents cleanup from being certified. A Monitor is one grouped service: its worker failures may be delayed by resident siblings. See [worker](https://github.com/nanfeng-labs/miju-services/blob/v0.2.0-beta.5/examples/miju_worker.rs) and [monitor](https://github.com/nanfeng-labs/miju-services/blob/v0.2.0-beta.5/examples/miju_monitor.rs).
+Use the supplied context, rather than creating another worker context. Start establishes the worker driver, not remote backend readiness. The bridge keeps polling the original stream after stop; job errors remain observable in snapshots. Backend failure or Monitor restart history leaves aggregate responsibility unconfirmed and prevents cleanup from being certified. A Monitor is one grouped service: its worker failures may be delayed by resident siblings. See [worker](https://github.com/nanfeng-labs/miju-services/blob/v0.2.0-beta.6/examples/miju_worker.rs) and [monitor](https://github.com/nanfeng-labs/miju-services/blob/v0.2.0-beta.6/examples/miju_monitor.rs).
 
 For a simple polling operation, no queue is needed:
 
@@ -158,7 +158,7 @@ let app = App::builder()
 
 `fixed_delay` waits after completion. `fixed_rate_skip` uses fixed slots and skips busy or missed opportunities. If a round starts at second 0 and finishes at second 8 with a five-second period, the next start is second 13 or second 10, respectively. Defaults are immediate first execution, serial rounds, and recorded business errors followed by the next period; there is no hidden retry. Use `PeriodicRule` and `RoundContext` for a delayed first round, concrete errors, cooperative stopping, or failure escalation.
 
-Calendar work uses [miju-cron directly as a backend](https://github.com/nanfeng-labs/miju-services/blob/v0.2.0-beta.5/examples/cron_worker.rs). The advanced [bounded queue example](https://github.com/nanfeng-labs/miju-services/blob/v0.2.0-beta.5/examples/bounded_queue_rounds.rs) adds application-owned admission, target overlap policy, and final receipts around miju execution. Its capacity covers queued plus running work; stop finishes taken jobs and cancels the rest. Receipts wrap the full configured retry chain. `MemoryStorage` itself is unbounded; limiting worker concurrency alone does not bound backlog.
+Calendar work uses [miju-cron directly as a backend](https://github.com/nanfeng-labs/miju-services/blob/v0.2.0-beta.6/examples/cron_worker.rs). The advanced [bounded queue example](https://github.com/nanfeng-labs/miju-services/blob/v0.2.0-beta.6/examples/bounded_queue_rounds.rs) adds application-owned admission, target overlap policy, and final receipts around miju execution. Its capacity covers queued plus running work; stop finishes taken jobs and cancels the rest. Receipts wrap the full configured retry chain. `MemoryStorage` itself is unbounded; limiting worker concurrency alone does not bound backlog.
 
 ## Examples
 
@@ -168,22 +168,22 @@ Run `cargo run --example http` for `127.0.0.1:3000`, `websocket` for `ws://127.0
 
 | Example | Focus |
 | --- | --- |
-| [basic](https://github.com/nanfeng-labs/miju-services/blob/v0.2.0-beta.5/examples/basic.rs) | Register a function and run until Ctrl-C. |
-| [shared_resource](https://github.com/nanfeng-labs/miju-services/blob/v0.2.0-beta.5/examples/shared_resource.rs) | Typed settings, constructor injection, cleanup, and bootstrap rollback. |
-| [configured_app](https://github.com/nanfeng-labs/miju-services/blob/v0.2.0-beta.5/examples/configured_app/README.md) | Multiple configuration sources, typed settings, centralized assembly, and file cleanup. |
-| [watched_settings](https://github.com/nanfeng-labs/miju-services/blob/v0.2.0-beta.5/examples/watched_settings.rs) | Immutable per-round snapshots and application-owned configuration updates. |
-| [startup_failure](https://github.com/nanfeng-labs/miju-services/blob/v0.2.0-beta.5/examples/startup_failure.rs) | Required initialization failure exits without a host signal. |
-| [managed_work](https://github.com/nanfeng-labs/miju-services/blob/v0.2.0-beta.5/examples/managed_work.rs) | Finite prerequisites and service-owned background work. |
-| [operational_host](https://github.com/nanfeng-labs/miju-services/blob/v0.2.0-beta.5/examples/operational_host.rs) | Observe failure from startup and choose an explicit second-signal policy. |
-| [miju_worker](https://github.com/nanfeng-labs/miju-services/blob/v0.2.0-beta.5/examples/miju_worker.rs) | Construct a real miju worker once and manage its lifecycle. |
-| [miju_monitor](https://github.com/nanfeng-labs/miju-services/blob/v0.2.0-beta.5/examples/miju_monitor.rs) | Attach a group with upstream restart and aggregate-result semantics. |
-| [periodic](https://github.com/nanfeng-labs/miju-services/blob/v0.2.0-beta.5/examples/periodic.rs) | A period and one asynchronous operation, without a queue. |
-| [cron_worker](https://github.com/nanfeng-labs/miju-services/blob/v0.2.0-beta.5/examples/cron_worker.rs) | Calendar scheduling directly through a miju-cron backend. |
-| [bounded_queue_rounds](https://github.com/nanfeng-labs/miju-services/blob/v0.2.0-beta.5/examples/bounded_queue_rounds.rs) | Advanced bounded admission, overlap, final receipts, and queued-job cancellation. |
-| [http](https://github.com/nanfeng-labs/miju-services/blob/v0.2.0-beta.5/examples/http.rs) | Supply business routes, bind before ready, and wait for actual release. |
-| [websocket](https://github.com/nanfeng-labs/miju-services/blob/v0.2.0-beta.5/examples/websocket.rs) | Admit before 101, retain upgrade responsibility, and bound session close. |
-| [udp](https://github.com/nanfeng-labs/miju-services/blob/v0.2.0-beta.5/examples/udp.rs) | Drop overload and drain accepted datagrams. |
-| [embedded_runtime](https://github.com/nanfeng-labs/miju-services/blob/v0.2.0-beta.5/examples/embedded_runtime.rs) | Retain the runtime after Pending until cleanup actually completes. |
+| [basic](https://github.com/nanfeng-labs/miju-services/blob/v0.2.0-beta.6/examples/basic.rs) | Register a function and run until Ctrl-C. |
+| [shared_resource](https://github.com/nanfeng-labs/miju-services/blob/v0.2.0-beta.6/examples/shared_resource.rs) | Typed settings, constructor injection, cleanup, and bootstrap rollback. |
+| [configured_app](https://github.com/nanfeng-labs/miju-services/blob/v0.2.0-beta.6/examples/configured_app/README.md) | Multiple configuration sources, typed settings, centralized assembly, and file cleanup. |
+| [watched_settings](https://github.com/nanfeng-labs/miju-services/blob/v0.2.0-beta.6/examples/watched_settings.rs) | Immutable per-round snapshots and application-owned configuration updates. |
+| [startup_failure](https://github.com/nanfeng-labs/miju-services/blob/v0.2.0-beta.6/examples/startup_failure.rs) | Required initialization failure exits without a host signal. |
+| [managed_work](https://github.com/nanfeng-labs/miju-services/blob/v0.2.0-beta.6/examples/managed_work.rs) | Finite prerequisites and service-owned background work. |
+| [operational_host](https://github.com/nanfeng-labs/miju-services/blob/v0.2.0-beta.6/examples/operational_host.rs) | Observe failure from startup and choose an explicit second-signal policy. |
+| [miju_worker](https://github.com/nanfeng-labs/miju-services/blob/v0.2.0-beta.6/examples/miju_worker.rs) | Construct a real miju worker once and manage its lifecycle. |
+| [miju_monitor](https://github.com/nanfeng-labs/miju-services/blob/v0.2.0-beta.6/examples/miju_monitor.rs) | Attach a group with upstream restart and aggregate-result semantics. |
+| [periodic](https://github.com/nanfeng-labs/miju-services/blob/v0.2.0-beta.6/examples/periodic.rs) | A period and one asynchronous operation, without a queue. |
+| [cron_worker](https://github.com/nanfeng-labs/miju-services/blob/v0.2.0-beta.6/examples/cron_worker.rs) | Calendar scheduling directly through a miju-cron backend. |
+| [bounded_queue_rounds](https://github.com/nanfeng-labs/miju-services/blob/v0.2.0-beta.6/examples/bounded_queue_rounds.rs) | Advanced bounded admission, overlap, final receipts, and queued-job cancellation. |
+| [http](https://github.com/nanfeng-labs/miju-services/blob/v0.2.0-beta.6/examples/http.rs) | Supply business routes, bind before ready, and wait for actual release. |
+| [websocket](https://github.com/nanfeng-labs/miju-services/blob/v0.2.0-beta.6/examples/websocket.rs) | Admit before 101, retain upgrade responsibility, and bound session close. |
+| [udp](https://github.com/nanfeng-labs/miju-services/blob/v0.2.0-beta.6/examples/udp.rs) | Drop overload and drain accepted datagrams. |
+| [embedded_runtime](https://github.com/nanfeng-labs/miju-services/blob/v0.2.0-beta.6/examples/embedded_runtime.rs) | Retain the runtime after Pending until cleanup actually completes. |
 
 ## How miju-services works
 
@@ -236,9 +236,9 @@ let app = App::builder()
 # }
 ```
 
-Before `start` succeeds, bootstrap owns rollback. Keep independent access to resources needed for rollback: dropping a builder or an unstarted `App` cannot run asynchronous cleanup. `StartError::into_app()` recovers an app rejected because no Tokio runtime is active. After acceptance, the driver owns registered cleanup, including partial initialization failures. The [shared resource example](https://github.com/nanfeng-labs/miju-services/blob/v0.2.0-beta.5/examples/shared_resource.rs) includes that application boundary and a concrete `Service` implementation.
+Before `start` succeeds, bootstrap owns rollback. Keep independent access to resources needed for rollback: dropping a builder or an unstarted `App` cannot run asynchronous cleanup. `StartError::into_app()` recovers an app rejected because no Tokio runtime is active. After acceptance, the driver owns registered cleanup, including partial initialization failures. The [shared resource example](https://github.com/nanfeng-labs/miju-services/blob/v0.2.0-beta.6/examples/shared_resource.rs) includes that application boundary and a concrete `Service` implementation.
 
-For multiple configuration sources, see [configured_app](https://github.com/nanfeng-labs/miju-services/blob/v0.2.0-beta.5/examples/configured_app/README.md). It loads Default → explicit TOML → application environment → CLI, explains the effective sources, then assembles a file-backed sampler. The service opens its output after start accepts and registers `defer_cleanup` before readiness, so an unstarted App has no file to roll back. The separate [watch example](https://github.com/nanfeng-labs/miju-services/blob/v0.2.0-beta.5/examples/watched_settings.rs) shows one immutable configuration snapshot per round. Both stay outside the library's normal dependency tree.
+For multiple configuration sources, see [configured_app](https://github.com/nanfeng-labs/miju-services/blob/v0.2.0-beta.6/examples/configured_app/README.md). It loads Default → explicit TOML → application environment → CLI, explains the effective sources, then assembles a file-backed sampler. The service opens its output after start accepts and registers `defer_cleanup` before readiness, so an unstarted App has no file to roll back. The separate [watch example](https://github.com/nanfeng-labs/miju-services/blob/v0.2.0-beta.6/examples/watched_settings.rs) shows one immutable configuration snapshot per round. Both stay outside the library's normal dependency tree.
 
 ### Readiness and health
 
@@ -256,7 +256,7 @@ Ordinary asynchronous work can be aborted after the shutdown grace period. Start
 
 Grace expiry requests eligible aborts. It does not prove completion or allow cleanup to overtake work. A pending blocking operation, unconfirmed external work, or unfinished cleanup keeps the driver alive and prevents a final report.
 
-`run_until()` and `shutdown()` wait without a deadline. For bounded observation, use `start()` followed by `shutdown_within(duration)`; `Pending` reports unfinished responsibility. Keep the runtime alive to continue waiting, or choose an explicit process-exit policy such as [operational_host](https://github.com/nanfeng-labs/miju-services/blob/v0.2.0-beta.5/examples/operational_host.rs). A timeout does not release resources or produce a final report.
+`run_until()` and `shutdown()` wait without a deadline. For bounded observation, use `start()` followed by `shutdown_within(duration)`; `Pending` reports unfinished responsibility. Keep the runtime alive to continue waiting, or choose an explicit process-exit policy such as [operational_host](https://github.com/nanfeng-labs/miju-services/blob/v0.2.0-beta.6/examples/operational_host.rs). A timeout does not release resources or produce a final report.
 
 The stop grace is shared from the first application stop request. A provider receives only the time left after its consumers drain, possibly no cooperative turn before abort. Put required asynchronous teardown in registered cleanup rather than relying on the provider root's stopping branch.
 
@@ -304,7 +304,7 @@ Bounded observation does not bound Tokio runtime destruction. Returning from `#[
 
 The runtime must also have Tokio's time driver enabled. `start()` checks that a runtime is active, but cannot establish this capability; without it, the lifecycle driver can panic on its first timer poll after services have been accepted. Service roots may then continue without lifecycle supervision, and cleanup or a final report is not guaranteed.
 
-`run_until` retains errors from the stop source alongside the final report. Its terminal branch has priority when both terminal observation and the stop source are ready. A host that needs diagnostics and a second-signal force-exit policy can use the [operational host example](https://github.com/nanfeng-labs/miju-services/blob/v0.2.0-beta.5/examples/operational_host.rs); force exit is a process decision and supplies no completion certificate.
+`run_until` retains errors from the stop source alongside the final report. Its terminal branch has priority when both terminal observation and the stop source are ready. A host that needs diagnostics and a second-signal force-exit policy can use the [operational host example](https://github.com/nanfeng-labs/miju-services/blob/v0.2.0-beta.6/examples/operational_host.rs); force exit is a process decision and supplies no completion certificate.
 
 ## Cargo features
 
@@ -322,7 +322,7 @@ Default features are `miju` and `periodic`; either can be selected independently
 
 Ordinary Rust applications keep their own Tokio runtime. With the default-off `jni` feature, implement `jni::AppFactory` to return an unstarted `App` and invoke `jni::export!` once for five Java static methods. The JNI owner retains one runtime per generation until work, cleanup and user references have actually released. A Java stop timeout ends only that observation.
 
-The unstarted App returned by the factory must be safe to drop synchronously. Acquire async-close resources inside service initialization and register cleanup before ready; builder cleanup is not pre-start rollback. See the [JNI example](https://github.com/nanfeng-labs/miju-services/blob/v0.2.0-beta.5/examples/jni/README.md) for Rust assembly, Java declarations and a real UDP caller.
+The unstarted App returned by the factory must be safe to drop synchronously. Acquire async-close resources inside service initialization and register cleanup before ready; builder cleanup is not pre-start rollback. See the [JNI example](https://github.com/nanfeng-labs/miju-services/blob/v0.2.0-beta.6/examples/jni/README.md) for Rust assembly, Java declarations and a real UDP caller.
 
 ## Development
 
@@ -339,4 +339,4 @@ Two Windows 10 x64/MSVC desktop JNI All runs completed the Rust 1.96/1.89 and JD
 
 ## License
 
-miju-services is licensed under the [MIT License](https://github.com/nanfeng-labs/miju-services/blob/v0.2.0-beta.5/LICENSE).
+miju-services is licensed under the [MIT License](https://github.com/nanfeng-labs/miju-services/blob/v0.2.0-beta.6/LICENSE).

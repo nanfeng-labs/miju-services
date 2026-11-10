@@ -2,9 +2,26 @@
 
 ## [Unreleased]
 
+## [0.2.0-beta.6]
+
+- bump: to v0.2.0-beta.6 ([#24](https://github.com/nanfeng-labs/miju-services/pull/24))
 - docs: clarify shutdown and strengthen lifecycle evidence ([#23](https://github.com/nanfeng-labs/miju-services/pull/23))
+
+### Validation
+
+- Strengthen queued-blocking runtime-shutdown, Monitor restart-success and JNI
+  runtime-release regression evidence.
+- Document two completed Windows 10 x64/MSVC desktop JNI All runs, including the
+  functional matrix, formal load, resource observations and public replay archive.
+  The recorded executions are bound to main commit `af51bc0`.
+
+### Documentation
+
 - Clarify that queued blocking work may begin during Tokio runtime shutdown.
-- Strengthen Monitor restart-success and JNI runtime-release regression evidence.
+- Separate recorded Windows workstation acceptance from Linux/macOS JVM CI,
+  Android ART and target business-application acceptance.
+
+Public APIs, dependencies and execution policy are unchanged from beta.5.
 
 ## [0.2.0-beta.5]
 
