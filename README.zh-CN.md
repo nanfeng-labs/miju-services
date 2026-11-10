@@ -335,6 +335,8 @@ cargo clippy --all-targets --all-features --locked -- -D warnings
 
 CI 将编译、测试、格式、Clippy、文档及未使用依赖检查拆为独立 jobs，并配置 Linux/macOS/Windows 测试及 Rust 1.89 验证。
 
+Windows 10 x64/MSVC 桌面 JNI 已完成两次 All，覆盖 Rust 1.96/1.89 与 JDK 17/21 功能矩阵，以及 Rust 1.96/JDK 17 下的 120 秒预热和 1800 秒正式负载。[验收说明](https://github.com/nanfeng-labs/miju-services/releases/download/v0.2.0-beta.5/BETA5-WINDOWS-ACCEPTANCE.md)与[原始证据及便携复核脚本](https://github.com/nanfeng-labs/miju-services/releases/download/v0.2.0-beta.5/miju-services-beta5-windows-acceptance-20261110.zip)将这些执行绑定到 main 提交 `af51bc0`，并保留资源观察与适用范围。Android ART 和目标业务应用仍分别验收。
+
 ## 许可证
 
 miju-services 采用 [MIT 许可证](https://github.com/nanfeng-labs/miju-services/blob/v0.2.0-beta.5/LICENSE)。

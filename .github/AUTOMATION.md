@@ -16,8 +16,10 @@ repository settings or prove that GitHub-hosted jobs have run.
   Ordinary checks use `actions-rust-lang/setup-rust-toolchain`; docs and udeps
   use nightly as in miju. Each PR is checked on its own source input; prior beta platform results do not certify the refactor.
 - The `jvm` CI job defines Linux/macOS, JDK 17/21 and stable/MSRV real UDP
-  consumer runs with `-Xcheck:jni`. Windows JNI and Android ART are unvalidated.
-  Its implementation and CI job arrive with the JNI batch. Platform acceptance remains tied to actual run evidence.
+  consumer runs with `-Xcheck:jni`. Windows desktop JNI has separate
+  [workstation acceptance evidence](https://github.com/nanfeng-labs/miju-services/releases/download/v0.2.0-beta.5/BETA5-WINDOWS-ACCEPTANCE.md)
+  bound to main commit `af51bc0`; it is not a Windows JVM CI job. Android ART
+  remains unvalidated. Platform acceptance remains tied to actual run evidence.
 - `pr-checks.yaml` prepares same-repository PRs, then validates the live title and
   changelog. Titles contain the PR's own `#N`. Dependabot titles and changelog
   entries are exempt; maintainers can use `skip-changelog` to waive the entry check.

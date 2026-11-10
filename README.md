@@ -335,6 +335,8 @@ cargo clippy --all-targets --all-features --locked -- -D warnings
 
 CI runs separate check, test, format, Clippy, documentation, and unused-dependency jobs, with Linux/macOS/Windows test and Rust 1.89 coverage.
 
+Two Windows 10 x64/MSVC desktop JNI All runs completed the Rust 1.96/1.89 and JDK 17/21 functional matrix, plus a 120-second warmup and 1800-second formal load on Rust 1.96/JDK 17. The [acceptance note](https://github.com/nanfeng-labs/miju-services/releases/download/v0.2.0-beta.5/BETA5-WINDOWS-ACCEPTANCE.md) and [raw evidence with portable replay](https://github.com/nanfeng-labs/miju-services/releases/download/v0.2.0-beta.5/miju-services-beta5-windows-acceptance-20261110.zip) bind those executions to main commit `af51bc0` and record the resource observations and limits. Android ART and target business-application acceptance remain separate.
+
 ## License
 
 miju-services is licensed under the [MIT License](https://github.com/nanfeng-labs/miju-services/blob/v0.2.0-beta.5/LICENSE).
