@@ -5,6 +5,7 @@
 ## [0.2.0-beta.6]
 
 - bump: to v0.2.0-beta.6 ([#24](https://github.com/nanfeng-labs/miju-services/pull/24))
+
 - docs: clarify shutdown and strengthen lifecycle evidence ([#23](https://github.com/nanfeng-labs/miju-services/pull/23))
 
 ### Validation
