@@ -1,4 +1,4 @@
-<!-- Also rendered as crate documentation: keep file links absolute and pinned to this release. -->
+<!-- Also rendered as crate documentation: keep navigation file links absolute and pinned to this release. -->
 
 <p align="center">
   <img src="https://raw.githubusercontent.com/nanfeng-labs/miju-services/v0.2.0-beta.5/assets/miju-services-header.svg" alt="miju-services" width="560" />
@@ -25,7 +25,7 @@
   <a href="https://www.rust-lang.org/">
     <img src="https://img.shields.io/badge/MSRV-1.89-orange.svg?logo=rust" alt="Rust 1.89 or newer" />
   </a>
-  <a href="https://github.com/nanfeng-labs/miju-services/blob/v0.2.0-beta.5/LICENSE">
+  <a href="https://github.com/nanfeng-labs/miju-services/blob/v0.2.0-beta.6/LICENSE">
     <img src="https://img.shields.io/github/license/nanfeng-labs/miju-services" alt="MIT license" />
   </a>
 </div>
@@ -33,7 +33,7 @@
 <br />
 
 <div align="center">
-  <a href="https://github.com/nanfeng-labs/miju-services/blob/v0.2.0-beta.5/README.md">English</a> · 简体中文
+  <a href="https://github.com/nanfeng-labs/miju-services/blob/v0.2.0-beta.6/README.md">English</a> · 简体中文
 </div>
 
 <br />
@@ -65,11 +65,11 @@
 
 需要 **Rust 1.89+**，以及启用了时间功能的 Tokio 运行时。
 
-下方示例使用 `0.2.0-beta.5` API。升级时，请先查看 [CHANGELOG](https://github.com/nanfeng-labs/miju-services/blob/v0.2.0-beta.5/CHANGELOG.md) 中的不兼容变更。
+下方示例使用 `0.2.0-beta.6` API。升级时，请先查看 [CHANGELOG](https://github.com/nanfeng-labs/miju-services/blob/v0.2.0-beta.6/CHANGELOG.md) 中的不兼容变更。
 
 ```toml
 [dependencies]
-miju-services = "0.2.0-beta.5"
+miju-services = "0.2.0-beta.6"
 tokio = { version = "1", features = ["rt", "time", "sync", "macros", "signal"] }
 ```
 
@@ -79,7 +79,7 @@ tokio = { version = "1", features = ["rt", "time", "sync", "macros", "signal"] }
 
 注册一个函数，运行至宿主请求停止，取得最终报告。
 
-`run_until()` 会一直等待所属工作和清理完成，不设等待期限。需要明确第二次信号退出策略的进程，可从 [operational_host](https://github.com/nanfeng-labs/miju-services/blob/v0.2.0-beta.5/examples/operational_host.rs) 入手；[embedded_runtime](https://github.com/nanfeng-labs/miju-services/blob/v0.2.0-beta.5/examples/embedded_runtime.rs) 展示有界观察以及继续持有运行时的方式。
+`run_until()` 会一直等待所属工作和清理完成，不设等待期限。需要明确第二次信号退出策略的进程，可从 [operational_host](https://github.com/nanfeng-labs/miju-services/blob/v0.2.0-beta.6/examples/operational_host.rs) 入手；[embedded_runtime](https://github.com/nanfeng-labs/miju-services/blob/v0.2.0-beta.6/examples/embedded_runtime.rs) 展示有界观察以及继续持有运行时的方式。
 
 ```rust,no_run
 use miju_services::{App, BoxError, ServiceContext};
@@ -135,7 +135,7 @@ App::builder()
 # }
 ```
 
-工厂必须使用传入 context，不另建控制身份。Start 只确认 worker 驱动建立，不代表远端 backend 已就绪。停止后桥接继续驱动同一 stream；作业错误在快照中可见。backend 失败或 Monitor 重启历史会保留未确认的聚合责任，阻止错误地认证清理完成。Monitor 整体作为一个服务，内部 worker 故障可能被常驻兄弟延迟汇总。见 [worker](https://github.com/nanfeng-labs/miju-services/blob/v0.2.0-beta.5/examples/miju_worker.rs) 与 [monitor](https://github.com/nanfeng-labs/miju-services/blob/v0.2.0-beta.5/examples/miju_monitor.rs)。
+工厂必须使用传入 context，不另建控制身份。Start 只确认 worker 驱动建立，不代表远端 backend 已就绪。停止后桥接继续驱动同一 stream；作业错误在快照中可见。backend 失败或 Monitor 重启历史会保留未确认的聚合责任，阻止错误地认证清理完成。Monitor 整体作为一个服务，内部 worker 故障可能被常驻兄弟延迟汇总。见 [worker](https://github.com/nanfeng-labs/miju-services/blob/v0.2.0-beta.6/examples/miju_worker.rs) 与 [monitor](https://github.com/nanfeng-labs/miju-services/blob/v0.2.0-beta.6/examples/miju_monitor.rs)。
 
 简单轮询只需要周期和一轮操作，不必使用队列：
 
@@ -158,7 +158,7 @@ let app = App::builder()
 
 `fixed_delay` 在完成后等待；`fixed_rate_skip` 使用固定时槽，跳过忙碌或错过的机会。若 0 秒开始、8 秒结束、周期 5 秒，下轮分别在 13 秒或 10 秒。默认立即首轮、串行执行，业务错误记录后继续下一周期，没有隐式重试。需要延迟首轮、具体错误、合作停止或失败升级时使用 `PeriodicRule` 与 `RoundContext`。
 
-[日历示例](https://github.com/nanfeng-labs/miju-services/blob/v0.2.0-beta.5/examples/cron_worker.rs) 直接以 miju-cron 为 backend。[高级队列示例](https://github.com/nanfeng-labs/miju-services/blob/v0.2.0-beta.5/examples/bounded_queue_rounds.rs) 在 miju 执行之外加入应用自己的接纳、目标重叠策略和最终回执：容量同时覆盖排队与执行；停止完成已取作业并取消未取作业；回执在完整重试链结束后发布。`MemoryStorage` 本身无界，worker 并发限制不等于积压上限。
+[日历示例](https://github.com/nanfeng-labs/miju-services/blob/v0.2.0-beta.6/examples/cron_worker.rs) 直接以 miju-cron 为 backend。[高级队列示例](https://github.com/nanfeng-labs/miju-services/blob/v0.2.0-beta.6/examples/bounded_queue_rounds.rs) 在 miju 执行之外加入应用自己的接纳、目标重叠策略和最终回执：容量同时覆盖排队与执行；停止完成已取作业并取消未取作业；回执在完整重试链结束后发布。`MemoryStorage` 本身无界，worker 并发限制不等于积压上限。
 
 ## 示例
 
@@ -168,22 +168,22 @@ let app = App::builder()
 
 | 示例 | 重点 |
 | --- | --- |
-| [basic](https://github.com/nanfeng-labs/miju-services/blob/v0.2.0-beta.5/examples/basic.rs) | 注册函数，运行至 Ctrl-C。 |
-| [shared_resource](https://github.com/nanfeng-labs/miju-services/blob/v0.2.0-beta.5/examples/shared_resource.rs) | 强类型设置、构造传参、清理和启动前回滚。 |
-| [configured_app](https://github.com/nanfeng-labs/miju-services/blob/v0.2.0-beta.5/examples/configured_app/README.md) | 多来源配置、强类型设置、集中装配与文件清理。 |
-| [watched_settings](https://github.com/nanfeng-labs/miju-services/blob/v0.2.0-beta.5/examples/watched_settings.rs) | 单轮固定快照与应用持有的配置更新。 |
-| [startup_failure](https://github.com/nanfeng-labs/miju-services/blob/v0.2.0-beta.5/examples/startup_failure.rs) | 必要初始化失败，无须宿主信号即可退出。 |
-| [managed_work](https://github.com/nanfeng-labs/miju-services/blob/v0.2.0-beta.5/examples/managed_work.rs) | 有限前置步骤及服务所属后台工作。 |
-| [operational_host](https://github.com/nanfeng-labs/miju-services/blob/v0.2.0-beta.5/examples/operational_host.rs) | 从启动起观察故障，明确第二次信号策略。 |
-| [miju_worker](https://github.com/nanfeng-labs/miju-services/blob/v0.2.0-beta.5/examples/miju_worker.rs) | 一次构造真实 miju worker 并管理其生命周期。 |
-| [miju_monitor](https://github.com/nanfeng-labs/miju-services/blob/v0.2.0-beta.5/examples/miju_monitor.rs) | 按上游重启与聚合结果语义接入一组 worker。 |
-| [periodic](https://github.com/nanfeng-labs/miju-services/blob/v0.2.0-beta.5/examples/periodic.rs) | 周期与一轮异步操作，无须队列。 |
-| [cron_worker](https://github.com/nanfeng-labs/miju-services/blob/v0.2.0-beta.5/examples/cron_worker.rs) | 直接使用 miju-cron 日历 backend。 |
-| [bounded_queue_rounds](https://github.com/nanfeng-labs/miju-services/blob/v0.2.0-beta.5/examples/bounded_queue_rounds.rs) | 高级有界接纳、重叠、最终回执及未取作业取消。 |
-| [http](https://github.com/nanfeng-labs/miju-services/blob/v0.2.0-beta.5/examples/http.rs) | 提供业务 Router，bind 后就绪，等待实际释放。 |
-| [websocket](https://github.com/nanfeng-labs/miju-services/blob/v0.2.0-beta.5/examples/websocket.rs) | 101 前接纳、升级释放屏障和有界会话关闭。 |
-| [udp](https://github.com/nanfeng-labs/miju-services/blob/v0.2.0-beta.5/examples/udp.rs) | 满载丢弃与已接纳数据报排空。 |
-| [embedded_runtime](https://github.com/nanfeng-labs/miju-services/blob/v0.2.0-beta.5/examples/embedded_runtime.rs) | Pending 后保留运行时，直到实际清理结束。 |
+| [basic](https://github.com/nanfeng-labs/miju-services/blob/v0.2.0-beta.6/examples/basic.rs) | 注册函数，运行至 Ctrl-C。 |
+| [shared_resource](https://github.com/nanfeng-labs/miju-services/blob/v0.2.0-beta.6/examples/shared_resource.rs) | 强类型设置、构造传参、清理和启动前回滚。 |
+| [configured_app](https://github.com/nanfeng-labs/miju-services/blob/v0.2.0-beta.6/examples/configured_app/README.md) | 多来源配置、强类型设置、集中装配与文件清理。 |
+| [watched_settings](https://github.com/nanfeng-labs/miju-services/blob/v0.2.0-beta.6/examples/watched_settings.rs) | 单轮固定快照与应用持有的配置更新。 |
+| [startup_failure](https://github.com/nanfeng-labs/miju-services/blob/v0.2.0-beta.6/examples/startup_failure.rs) | 必要初始化失败，无须宿主信号即可退出。 |
+| [managed_work](https://github.com/nanfeng-labs/miju-services/blob/v0.2.0-beta.6/examples/managed_work.rs) | 有限前置步骤及服务所属后台工作。 |
+| [operational_host](https://github.com/nanfeng-labs/miju-services/blob/v0.2.0-beta.6/examples/operational_host.rs) | 从启动起观察故障，明确第二次信号策略。 |
+| [miju_worker](https://github.com/nanfeng-labs/miju-services/blob/v0.2.0-beta.6/examples/miju_worker.rs) | 一次构造真实 miju worker 并管理其生命周期。 |
+| [miju_monitor](https://github.com/nanfeng-labs/miju-services/blob/v0.2.0-beta.6/examples/miju_monitor.rs) | 按上游重启与聚合结果语义接入一组 worker。 |
+| [periodic](https://github.com/nanfeng-labs/miju-services/blob/v0.2.0-beta.6/examples/periodic.rs) | 周期与一轮异步操作，无须队列。 |
+| [cron_worker](https://github.com/nanfeng-labs/miju-services/blob/v0.2.0-beta.6/examples/cron_worker.rs) | 直接使用 miju-cron 日历 backend。 |
+| [bounded_queue_rounds](https://github.com/nanfeng-labs/miju-services/blob/v0.2.0-beta.6/examples/bounded_queue_rounds.rs) | 高级有界接纳、重叠、最终回执及未取作业取消。 |
+| [http](https://github.com/nanfeng-labs/miju-services/blob/v0.2.0-beta.6/examples/http.rs) | 提供业务 Router，bind 后就绪，等待实际释放。 |
+| [websocket](https://github.com/nanfeng-labs/miju-services/blob/v0.2.0-beta.6/examples/websocket.rs) | 101 前接纳、升级释放屏障和有界会话关闭。 |
+| [udp](https://github.com/nanfeng-labs/miju-services/blob/v0.2.0-beta.6/examples/udp.rs) | 满载丢弃与已接纳数据报排空。 |
+| [embedded_runtime](https://github.com/nanfeng-labs/miju-services/blob/v0.2.0-beta.6/examples/embedded_runtime.rs) | Pending 后保留运行时，直到实际清理结束。 |
 
 ## 工作原理
 
@@ -236,9 +236,9 @@ let app = App::builder()
 # }
 ```
 
-`start` 接纳前，回滚归应用 bootstrap 负责。应用须保留回滚所需的独立访问能力；丢弃 builder 或尚未启动的 `App` 无法执行异步清理。缺少 Tokio 运行时导致的启动拒绝可用 `StartError::into_app()` 取回装配。接纳后，登记的清理归 driver 负责，包含部分初始化失败的收尾。[共享资源示例](https://github.com/nanfeng-labs/miju-services/blob/v0.2.0-beta.5/examples/shared_resource.rs) 展示这个边界及具体 `Service` 实现。
+`start` 接纳前，回滚归应用 bootstrap 负责。应用须保留回滚所需的独立访问能力；丢弃 builder 或尚未启动的 `App` 无法执行异步清理。缺少 Tokio 运行时导致的启动拒绝可用 `StartError::into_app()` 取回装配。接纳后，登记的清理归 driver 负责，包含部分初始化失败的收尾。[共享资源示例](https://github.com/nanfeng-labs/miju-services/blob/v0.2.0-beta.6/examples/shared_resource.rs) 展示这个边界及具体 `Service` 实现。
 
-[configured_app](https://github.com/nanfeng-labs/miju-services/blob/v0.2.0-beta.5/examples/configured_app/README.md) 展示默认值 → 显式 TOML → 应用环境变量 → CLI，解释各有效值的来源，再集中装配采样服务。服务在启动接纳后打开文件，并在就绪前登记 `defer_cleanup`；尚未启动的 App 无须回滚文件资源。[watch 示例](https://github.com/nanfeng-labs/miju-services/blob/v0.2.0-beta.5/examples/watched_settings.rs) 另行展示每轮持有一份不可变配置快照。配置依赖只用于示例，不进入普通库消费者的依赖树。
+[configured_app](https://github.com/nanfeng-labs/miju-services/blob/v0.2.0-beta.6/examples/configured_app/README.md) 展示默认值 → 显式 TOML → 应用环境变量 → CLI，解释各有效值的来源，再集中装配采样服务。服务在启动接纳后打开文件，并在就绪前登记 `defer_cleanup`；尚未启动的 App 无须回滚文件资源。[watch 示例](https://github.com/nanfeng-labs/miju-services/blob/v0.2.0-beta.6/examples/watched_settings.rs) 另行展示每轮持有一份不可变配置快照。配置依赖只用于示例，不进入普通库消费者的依赖树。
 
 ### 就绪与健康
 
@@ -256,7 +256,7 @@ let app = App::builder()
 
 宽限到期请求符合条件的 abort，不代表完成，也不允许清理越过工作。未结束的阻塞操作、外部未确认责任或挂起的清理都会保留 driver，阻止产生最终报告。
 
-`run_until()` 和 `shutdown()` 不设等待期限。需要有界观察时，使用 `start()` 取得句柄，再调用 `shutdown_within(duration)`；`Pending` 表示责任尚未结束。宿主可以保留运行时继续等待，或像 [operational_host](https://github.com/nanfeng-labs/miju-services/blob/v0.2.0-beta.5/examples/operational_host.rs) 一样明确选择进程退出策略。超时不会释放资源，也不会生成最终报告。
+`run_until()` 和 `shutdown()` 不设等待期限。需要有界观察时，使用 `start()` 取得句柄，再调用 `shutdown_within(duration)`；`Pending` 表示责任尚未结束。宿主可以保留运行时继续等待，或像 [operational_host](https://github.com/nanfeng-labs/miju-services/blob/v0.2.0-beta.6/examples/operational_host.rs) 一样明确选择进程退出策略。超时不会释放资源，也不会生成最终报告。
 
 停止宽限从应用的首次停止请求起算，由全部服务共享。provider 只能使用消费者排空后的剩余时间，可能在获得合作停止的执行机会前就被 abort。必要的异步收尾应登记为 cleanup，不能只放在 provider 根的停止分支中。
 
@@ -304,7 +304,7 @@ assert!(report.is_success());
 
 宿主还必须启用 Tokio time driver。`start()` 会检查当前 runtime 是否存在，但无法确认它具备计时能力；缺少 time driver 时，服务已被接纳后，生命周期 driver 可能在首次轮询计时器时 panic 丢失。服务根任务可能继续运行而失去生命周期监管，cleanup 和最终报告均不保证完成。
 
-`run_until` 保留停止来源错误和最终报告。终态观察与停止来源同时就绪时，终态分支优先。需要运行诊断及第二次信号强退策略的宿主可参考[运行宿主示例](https://github.com/nanfeng-labs/miju-services/blob/v0.2.0-beta.5/examples/operational_host.rs)；强退由应用决定，不产生完成证书。
+`run_until` 保留停止来源错误和最终报告。终态观察与停止来源同时就绪时，终态分支优先。需要运行诊断及第二次信号强退策略的宿主可参考[运行宿主示例](https://github.com/nanfeng-labs/miju-services/blob/v0.2.0-beta.6/examples/operational_host.rs)；强退由应用决定，不产生完成证书。
 
 ## Cargo features
 
@@ -322,7 +322,7 @@ assert!(report.is_success());
 
 普通 Rust 应用继续拥有 Tokio runtime。启用默认关闭的 `jni` feature 后，工厂实现 `jni::AppFactory` 并返回未启动 `App`，通过一次 `jni::export!` 导出五个 Java 静态方法。JNI owner 为每代应用持有自己的 runtime，等待工作、清理及用户引用实际释放后才允许下一代；Java stop 超时只结束该次观察。
 
-工厂返回的未启动 App 必须可安全同步析构。需要异步关闭的资源在服务初始化中取得，并在 ready 前登记清理；builder cleanup 不代替启动前回滚。完整的 Rust 装配、Java bridge 与真实 UDP 调用见 [JNI 示例](https://github.com/nanfeng-labs/miju-services/blob/v0.2.0-beta.5/examples/jni/README.md)。
+工厂返回的未启动 App 必须可安全同步析构。需要异步关闭的资源在服务初始化中取得，并在 ready 前登记清理；builder cleanup 不代替启动前回滚。完整的 Rust 装配、Java bridge 与真实 UDP 调用见 [JNI 示例](https://github.com/nanfeng-labs/miju-services/blob/v0.2.0-beta.6/examples/jni/README.md)。
 
 ## 开发
 
@@ -335,6 +335,8 @@ cargo clippy --all-targets --all-features --locked -- -D warnings
 
 CI 将编译、测试、格式、Clippy、文档及未使用依赖检查拆为独立 jobs，并配置 Linux/macOS/Windows 测试及 Rust 1.89 验证。
 
+Windows 10 x64/MSVC 桌面 JNI 已完成两次 All，覆盖 Rust 1.96/1.89 与 JDK 17/21 功能矩阵，以及 Rust 1.96/JDK 17 下的 120 秒预热和 1800 秒正式负载。[验收说明](https://github.com/nanfeng-labs/miju-services/releases/download/v0.2.0-beta.5/BETA5-WINDOWS-ACCEPTANCE.md)与[原始证据及便携复核脚本](https://github.com/nanfeng-labs/miju-services/releases/download/v0.2.0-beta.5/miju-services-beta5-windows-acceptance-20261110.zip)将这些执行绑定到 main 提交 `af51bc0`，并保留资源观察与适用范围。Android ART 和目标业务应用仍分别验收。
+
 ## 许可证
 
-miju-services 采用 [MIT 许可证](https://github.com/nanfeng-labs/miju-services/blob/v0.2.0-beta.5/LICENSE)。
+miju-services 采用 [MIT 许可证](https://github.com/nanfeng-labs/miju-services/blob/v0.2.0-beta.6/LICENSE)。
