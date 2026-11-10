@@ -61,6 +61,12 @@ explicit version-specific unaudited baseline exemptions; no audit is inferred fr
 JVM tests. Dependency updates must resolve new vet findings
 and document any exemption; never turn a failing check into an invented audit.
 
+`supply-chain/audits.toml` also records attributed AI-assisted delta reviews of
+miju and miju-core 0.2.0 to 0.2.1. These cover only the reviewed deltas, retain the
+unaudited 0.2.0 baseline exemptions, and do not represent an independent human
+security certification. Their `safe-to-deploy` criterion is cargo-vet's review
+classification; it does not certify the entire dependency graph.
+
 ## Releases
 
 Pushing a `vX.Y.Z` tag calls CI and dependency audit first. `cd.yaml` checks that

@@ -300,7 +300,7 @@ assert!(report.is_success());
 
 `Complete` means actual completion; inspect `report.is_success()` for outcome. Canceling an observation does not cancel the driver. Dropping the last control handle requests shutdown; observer and work handles do not keep a control lease. Keep the caller's runtime alive until completion. Losing that runtime can produce `DriverLost`, never a cleanup certificate.
 
-Bounded observation does not bound Tokio runtime destruction. Returning from `#[tokio::main]` can still wait for started blocking work during runtime drop; the application owns its runtime and process-exit policy.
+Bounded observation does not bound Tokio runtime destruction. Returning from `#[tokio::main]` can still wait for blocking work that has started or is still queued and may start during shutdown; the application owns its runtime and process-exit policy.
 
 The runtime must also have Tokio's time driver enabled. `start()` checks that a runtime is active, but cannot establish this capability; without it, the lifecycle driver can panic on its first timer poll after services have been accepted. Service roots may then continue without lifecycle supervision, and cleanup or a final report is not guaranteed.
 

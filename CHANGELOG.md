@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+- docs: clarify shutdown and strengthen lifecycle evidence ([#23](https://github.com/nanfeng-labs/miju-services/pull/23))
+- Clarify that queued blocking work may begin during Tokio runtime shutdown.
+- Strengthen Monitor restart-success and JNI runtime-release regression evidence.
+
 ## [0.2.0-beta.5]
 
 - bump: to v0.2.0-beta.5 ([#22](https://github.com/nanfeng-labs/miju-services/pull/22))
