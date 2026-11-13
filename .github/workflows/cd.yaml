@@ -3,15 +3,19 @@ name: cargo-publish
 on:
   push:
     tags: ["v*"]
+  release:
+    types: [published]
 
 permissions:
   contents: read
 
 jobs:
   test:
+    if: github.event_name == 'push'
     uses: ./.github/workflows/ci.yaml
 
   audit:
+    if: github.event_name == 'push'
     uses: ./.github/workflows/audit.yaml
 
   publish:
@@ -76,3 +80,32 @@ jobs:
         env:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
         run: cargo publish --registry crates-io --locked -p miju-services
+
+  full-changelog:
+    if: github.event_name == 'release' && startsWith(github.event.release.tag_name, 'v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    concurrency:
+      group: full-changelog-${{ github.event.release.id }}
+      cancel-in-progress: false
+    steps:
+      - name: append-full-changelog
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+        run: |
+          notes="$RUNNER_TEMP/release-notes.md"
+          gh release view "$RELEASE_TAG" --json body --jq '.body // ""' > "$notes"
+          if grep -q '^\*\*Full Changelog\*\*:' "$notes"; then
+            exit 0
+          fi
+          gh api --method POST "repos/$GH_REPO/releases/generate-notes" \
+            -f tag_name="$RELEASE_TAG" --jq .body > "$RUNNER_TEMP/generated-notes.md"
+          if ! link="$(grep -m1 '^\*\*Full Changelog\*\*:' "$RUNNER_TEMP/generated-notes.md")"; then
+            echo "::error::Generated notes did not contain a Full Changelog link."
+            exit 1
+          fi
+          printf '\n%s\n' "$link" >> "$notes"
+          gh release edit "$RELEASE_TAG" --notes-file "$notes"

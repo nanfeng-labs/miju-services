@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+- ci: append full changelog links to releases ([#25](https://github.com/nanfeng-labs/miju-services/pull/25))
+
 ## [0.2.0-beta.6]
 
 - bump: to v0.2.0-beta.6 ([#24](https://github.com/nanfeng-labs/miju-services/pull/24))
