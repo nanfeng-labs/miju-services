@@ -697,9 +697,9 @@ dependencies = [
 
 [[package]]
 name = "miju-cron"
-version = "0.2.0"
+version = "0.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "041be8c44880c509ddd46acbce2234bdc025b6564aaf148eea714a5e5da8d498"
+checksum = "87afb704b005da97a0932504fa82c24981db7e256c82037eb336573fff710ee9"
 dependencies = [
  "chrono",
  "chrono-tz",
