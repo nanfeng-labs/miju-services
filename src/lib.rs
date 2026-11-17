@@ -3,11 +3,10 @@
 //!
 //! This is the v0.3.0 core. The crate README still describes 0.2 and is not
 //! included as documentation until it has been rewritten.
-#![forbid(unsafe_code)]
+// Only the JNI boundary (`jni::ffi` and the `export!` macro) uses unsafe code.
+#![deny(unsafe_code)]
+#![cfg_attr(not(feature = "jni"), forbid(unsafe_code))]
 #![cfg_attr(docsrs, feature(doc_cfg))]
-
-#[cfg(feature = "jni")]
-compile_error!("the `jni` host has not been ported to the v0.3.0 core on this branch");
 
 pub mod app;
 pub mod observe;
@@ -22,6 +21,10 @@ pub mod periodic;
 #[cfg(feature = "miju")]
 #[cfg_attr(docsrs, doc(cfg(feature = "miju")))]
 pub mod miju;
+
+#[cfg(feature = "jni")]
+#[cfg_attr(docsrs, doc(cfg(feature = "jni")))]
+pub mod jni;
 
 mod cleanup;
 mod contain;

@@ -18,7 +18,7 @@ miju = ["dep:miju", "dep:futures-core"]
 ## Run one operation on a fixed delay or a fixed grid, inside its service's root.
 periodic = []
 ## Host one application generation at a time behind the five-method Java ABI.
-jni = ["dep:jni", "tokio/rt-multi-thread", "tokio/net"]
+jni = ["dep:jni", "tokio/rt-multi-thread"]
 ## Emit lifecycle events (failures, stopping, grace expiry, failed cleanup, termination, driver loss) without installing a subscriber.
 tracing = ["dep:tracing"]
 ## Generate the feature reference in documentation.

@@ -25,9 +25,10 @@ use std::{fmt, time::Duration};
 /// Every capture in the returned, unstarted App must be safe to abandon by
 /// synchronous drop. Stop or startup timeout may arrive while this factory runs;
 /// the owner then drops its result without starting services or async cleanup.
-/// A builder cleanup alone is not pre-start rollback. Acquire async-close
-/// resources inside service initialization and register `defer_cleanup` before
-/// reporting ready. On a factory error, local rollback must already be complete.
+/// Acquire async-close resources inside service initialization (or with
+/// [`crate::App::resource`]) and register their close with
+/// [`crate::Context::defer`] where they are acquired. On a factory error,
+/// local rollback must already be complete.
 ///
 /// Return an assembled, unstarted [`crate::App`]. Do not spawn detached
 /// tasks or perform indefinite blocking initialization here; asynchronous setup
@@ -102,18 +103,19 @@ impl std::error::Error for BuildError {}
 /// Export the single JVM loader entry point for this native library.
 ///
 /// ```no_run
-/// use miju_services::{App, service::{Lifetime, ServiceSpec}};
+/// use miju_services::{App, Spec};
 /// use miju_services::jni::{AppFactory, BuildError, BuildErrorKind};
 /// struct DeviceApp;
 /// impl AppFactory for DeviceApp {
 ///     const NAME: &'static str = "device-service";
 ///     const VERSION: &'static str = "1";
-///     fn build(_args: Vec<String>) -> Result<App, BuildError> {
-///         App::builder()
-///             .service_fn(ServiceSpec::new("initialize").lifetime(Lifetime::Finite),
-///                 |_| async { Ok(()) })
-///             .build()
-///             .map_err(|_| BuildError::new(BuildErrorKind::Startup, "assembly failed"))
+///     fn build(args: Vec<String>) -> Result<App, BuildError> {
+///         if !args.is_empty() {
+///             return Err(BuildError::new(BuildErrorKind::Usage, "no arguments expected"));
+///         }
+///         let mut app = App::new();
+///         app.service_fn(Spec::new("initialize").finite(), |_| async { Ok(()) });
+///         Ok(app)
 ///     }
 /// }
 /// // In a cdylib consumer, export once for the directly loading Java class.

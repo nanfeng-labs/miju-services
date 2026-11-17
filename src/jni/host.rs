@@ -2,14 +2,13 @@
 #![forbid(unsafe_code)]
 
 use super::{AppFactory, BuildError, BuildErrorKind};
-use crate::{
-    App, AppHandle, ExitReport,
-    observe::{AppObserver, ReadyError},
-    report::Phase,
-};
+use crate::{App, AppHandle, NotReady, Observer, Phase, Report, Status};
 use std::{
+    future::{Future, poll_fn},
     panic::{AssertUnwindSafe, catch_unwind},
+    pin::Pin,
     sync::{Arc, Condvar, Mutex},
+    task::Poll,
     thread,
     time::{Duration, Instant},
 };
@@ -416,8 +415,8 @@ struct Owned {
     runtime: Option<Runtime>,
     application: Option<App>,
     control: Option<AppHandle>,
-    observer: Option<AppObserver>,
-    report: Option<Arc<ExitReport>>,
+    observer: Option<Observer>,
+    report: Option<Arc<Report>>,
     possibly_started: bool,
 }
 
@@ -546,21 +545,24 @@ fn owner_body(
         .as_ref()
         .expect("started application has control");
     let report = runtime.block_on(async {
-        let ready = observer.ready(
-            generation
-                .deadline
-                .saturating_duration_since(Instant::now()),
-        );
+        // The Java start budget is the deadline branch; ready() itself has none.
+        let ready = observer.ready();
         let wait = observer.wait();
         let deadline =
             tokio::time::sleep_until(tokio::time::Instant::from_std(generation.deadline));
         tokio::pin!(ready, wait, deadline);
-        let mut snapshots = observer.subscribe();
+        let mut changed = subscribed(observer).await;
         let mut observe_ready = true;
         let mut observe_deadline = true;
-        let mut observe_snapshots = true;
         let mut delivered_stop = false;
         loop {
+            // Read after subscribing, so no later change is missed.
+            if matches!(
+                observer.status().phase,
+                Phase::Stopping | Phase::Cleaning | Phase::Terminated
+            ) {
+                generation.observe_stopping()?;
+            }
             tokio::select! {
                 biased;
                 report = &mut wait => {
@@ -570,20 +572,18 @@ fn owner_body(
                 ready = &mut ready, if observe_ready => {
                     observe_ready = false;
                     match ready {
-                        Ok(snapshot) => {
-                            drop(snapshot);
+                        Ok(()) => {
                             generation.available()?;
                             observe_deadline = false;
                         }
-                        Err(ReadyError::StoppedBeforeReady(_)) => {}
-                        Err(ReadyError::DriverLost(_)) => return Err(()),
-                        Err(ReadyError::Failed(_)) => {
+                        Err(NotReady::Stopped(_)) => {}
+                        Err(NotReady::Lost(_)) => return Err(()),
+                        Err(NotReady::Failed(_)) => {
                             generation.record_failure(
                                 STARTUP_FAILED,
                                 "required service failed before availability"
                             );
                         }
-                        Err(ReadyError::Timeout(_)) => generation.expire_start(),
                     }
                 }
                 _ = generation.stop.cancelled(), if !delivered_stop => {
@@ -596,17 +596,7 @@ fn owner_body(
                     observe_deadline = false;
                     generation.expire_start();
                 }
-                snapshot = snapshots.changed(), if observe_snapshots => {
-                    match snapshot {
-                        Some(snapshot)
-                            if matches!(
-                                snapshot.phase,
-                                Phase::Stopping | Phase::Cleaning | Phase::Terminated
-                            ) => generation.observe_stopping()?,
-                        Some(_) => {}
-                        None => observe_snapshots = false,
-                    }
-                }
+                _ = &mut changed => changed = subscribed(observer).await,
             }
         }
     })?;
@@ -620,6 +610,22 @@ fn owner_body(
         );
     }
     Ok(())
+}
+
+type StatusChange<'a> = Pin<Box<dyn Future<Output = Status> + Send + 'a>>;
+
+/// A wait for the next status change that has already subscribed.
+///
+/// `Observer::changed` subscribes on its first poll; polling it once here
+/// means a status read afterwards cannot fall between reading and subscribing.
+async fn subscribed(observer: &Observer) -> StatusChange<'_> {
+    loop {
+        let mut changed: StatusChange<'_> = Box::pin(observer.changed());
+        let fired = poll_fn(|cx| Poll::Ready(changed.as_mut().poll(cx).is_ready())).await;
+        if !fired {
+            return changed;
+        }
+    }
 }
 
 #[cfg(test)]
