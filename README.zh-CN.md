@@ -135,7 +135,7 @@ app.run_until(tokio::signal::ctrl_c()).await?;
 # }
 ```
 
-服务在 Worker 真正 `Start` 时就绪，这不代表远端 backend 已就绪。任务经由受管执行器运行，所有处理函数结束后服务才算排空。backend 失败会使服务失败；任务错误计入 `MijuStats`，不使服务失败。Monitor 是一个分组服务，其重启会被记录，但本身不使报告失败。Worker 或 Monitor 的宽限期到期时仍在运行的处理函数会被中断：持久化 backend 在孤儿超时后重新投递该任务，内存或 cron backend 则丢失它，报告注明该服务被强制结束。见 [worker](https://github.com/nanfeng-labs/miju-services/blob/v0.3.0/examples/miju_worker.rs) 与 [monitor](https://github.com/nanfeng-labs/miju-services/blob/v0.3.0/examples/miju_monitor.rs)。
+服务在 Worker 真正 `Start` 时就绪，这不代表远端 backend 已就绪；有限 Worker（`Spec::finite()`，用于有限计划）在其来源耗尽并排空后才算初始化完成。任务在 Worker 的 stream 内运行；Worker 加上 `.parallelize(seat.executor())` 时，任务作为该服务的受管工作运行。两种方式下，所有处理函数结束后服务才算排空，miju 已派发的任务即使先遇到停止也会运行，除非 stream 本身提前结束（例如第二次 backend 错误）。Worker 用普通 `tokio::spawn` 派生的任务不在服务的管理范围内。backend 失败会使服务失败；任务错误计入 `MijuStats`，不使服务失败。Monitor 是一个分组服务，其重启会被记录，但本身不使报告失败。Worker 或 Monitor 的宽限期到期时仍在运行的处理函数会被中断：持久化 backend 在孤儿超时后重新投递该任务，内存或 cron backend 则丢失它，报告注明该服务被强制结束。见 [worker](https://github.com/nanfeng-labs/miju-services/blob/v0.3.0/examples/miju_worker.rs) 与 [monitor](https://github.com/nanfeng-labs/miju-services/blob/v0.3.0/examples/miju_monitor.rs)。
 
 简单的轮询操作不需要队列：
 
@@ -242,7 +242,7 @@ app.service_fn(Spec::new("counter").after(&store), move |ctx| async move {
 
 ### 就绪与健康
 
-在监听绑定等真实初始化完成后调用 `ctx.ready()`。它锁存初始化，并将尚未显式声明的健康设为 `Healthy`；显式 `Unknown`、`Degraded`、`Unhealthy` 会保留。所有必要服务都已初始化且健康时，应用就绪。停止后或根返回后的调用会被忽略。
+在监听绑定等真实初始化完成后调用 `ctx.ready()`。它锁存初始化，并将尚未显式声明的健康设为 `Healthy`；显式 `Unknown`、`Degraded`、`Unhealthy` 会保留。所有必要服务都已初始化且健康时，应用就绪。停止后或根返回后的调用会被忽略；有限服务的调用也会被忽略，它在成功并排空后才算初始化完成。
 
 服务默认为必要的驻留服务。必要服务失败、panic、就绪超时（默认 30 秒，`app.startup_timeout(d)`）或驻留根意外返回都会停止应用。有限服务（`Spec::finite()`）是一次性步骤：成功并排空后即算初始化完成，不受启动超时限制。可选服务失败只停止并排空自身。没有自动重启。
 

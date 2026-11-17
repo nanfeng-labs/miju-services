@@ -311,6 +311,7 @@ impl Driver {
             slot.cell.state().started = true;
             let ctx = Context::new(slot.cell.clone(), self.core.clone());
             let record = slot.cell.clone();
+            let core = self.core.clone();
             slot.cell.scope.spawn_root(
                 RootFuture::Entry(Some((entry, ctx))),
                 Box::new(move |end: RootEnd| {
@@ -322,7 +323,10 @@ impl Driver {
                     };
                     record.state().root = Some(RootRecord {
                         outcome,
-                        stopping: end.stopping,
+                        // A return after the application stop was requested
+                        // is not early, even before this service's own stop:
+                        // a provider is asked to stop only after its consumers.
+                        stopping: end.stopping || core.stop_requested(),
                         release_panic: end.release_panic,
                     });
                 }),

@@ -950,3 +950,330 @@ async fn a_monitor_stop_lets_running_handlers_finish() {
     assert!(finished.load(SeqCst), "the running handler was dropped");
     assert!(report.is_success());
 }
+
+// A backend that requests application stop at the moment it yields its job.
+struct StopOnDispatch {
+    jobs: VecDeque<u32>,
+    handle: Arc<Mutex<Option<AppHandle>>>,
+}
+
+impl Backend for StopOnDispatch {
+    type Task = Task<u32>;
+    type Error = io::Error;
+    fn poll_ready(&mut self, _: &mut Context<'_>, _: &WorkerContext) -> Poll<io::Result<()>> {
+        Poll::Ready(Ok(()))
+    }
+    fn poll_next(
+        &mut self,
+        _: &mut Context<'_>,
+        _: &WorkerContext,
+    ) -> Poll<Option<io::Result<Task<u32>>>> {
+        match self.jobs.pop_front() {
+            Some(job) => {
+                // A stop request arrives at the moment the job is dispatched.
+                if let Some(handle) = self.handle.lock().unwrap().as_ref() {
+                    handle.stop();
+                }
+                Poll::Ready(Some(Ok(Task::new(job))))
+            }
+            None => Poll::Pending,
+        }
+    }
+    fn poll_close(&mut self, _: &mut Context<'_>, _: &WorkerContext) -> Poll<io::Result<()>> {
+        Poll::Ready(Ok(()))
+    }
+}
+
+impl BackendConfig for StopOnDispatch {
+    type Args = u32;
+    type Config = ();
+    type Kind = Ephemeral;
+    type Layer = tower::layer::util::Identity;
+    type Id = RandomId;
+    fn config(&self) -> &() {
+        &()
+    }
+    fn middleware(&mut self, _: &mut WorkerContext) -> Self::Layer {
+        tower::layer::util::Identity::new()
+    }
+}
+
+#[tokio::test]
+async fn a_dispatched_executor_job_runs_even_when_stop_lands_before_its_first_poll() {
+    let handle_slot = Arc::new(Mutex::new(None));
+    let handled = Arc::new(AtomicUsize::new(0));
+    let backend = StopOnDispatch {
+        jobs: VecDeque::from([1]),
+        handle: handle_slot.clone(),
+    };
+    let mut app = App::new();
+    {
+        let handled = handled.clone();
+        app.service(
+            "jobs",
+            worker(move |seat| {
+                WorkerBuilder::new(&seat)
+                    .backend(backend)
+                    .parallelize(seat.executor())
+                    .build(move |_job: u32| {
+                        let handled = handled.clone();
+                        async move {
+                            handled.fetch_add(1, SeqCst);
+                        }
+                    })
+                    .stream()
+            }),
+        );
+    }
+    let app = app.start().unwrap();
+    *handle_slot.lock().unwrap() = Some(app.clone());
+    let report = bounded(app.wait()).await.unwrap();
+    let service = report.service("jobs").unwrap();
+    let stats = service.detail::<MijuStats>().unwrap();
+    assert_eq!(
+        handled.load(SeqCst),
+        1,
+        "a dequeued job was dropped without running"
+    );
+    assert_eq!(service.work.cancelled, 0);
+    assert_eq!(stats.job_errors(), 0);
+    assert!(report.is_success());
+}
+
+// a finite worker's dependents must start only after the source is
+// exhausted and the worker has drained (design §5.9 / §7.1).
+#[tokio::test]
+async fn a_finite_worker_dependent_waits_for_exhaustion_and_drain() {
+    let (backend, _) = Scripted::new([Step::Job(1)], Tail::End);
+    let release = Arc::new(Notify::new());
+    let consumer_started_while_job_running = Arc::new(AtomicBool::new(false));
+    let job_running = Arc::new(AtomicBool::new(false));
+    let mut app = App::new();
+    {
+        let (release, job_running) = (release.clone(), job_running.clone());
+        app.service(
+            finite("calendar"),
+            worker(move |seat| {
+                WorkerBuilder::new(&seat)
+                    .backend(backend)
+                    .build(move |_job: u32| {
+                        let (release, job_running) = (release.clone(), job_running.clone());
+                        async move {
+                            job_running.store(true, SeqCst);
+                            release.notified().await;
+                            job_running.store(false, SeqCst);
+                        }
+                    })
+                    .stream()
+            }),
+        );
+    }
+    {
+        let (flag, job_running) = (
+            consumer_started_while_job_running.clone(),
+            job_running.clone(),
+        );
+        app.service_fn(
+            Spec::new("dependent").finite().after("calendar"),
+            move |_ctx| async move {
+                flag.store(job_running.load(SeqCst), SeqCst);
+                Ok(())
+            },
+        );
+    }
+    let app = app.start().unwrap();
+    until(|| job_running.load(SeqCst)).await;
+    for _ in 0..50 {
+        tokio::task::yield_now().await;
+    }
+    let dependent_phase = app.snapshot().service("dependent").unwrap().phase;
+    let calendar_initialized = app.snapshot().service("calendar").unwrap().initialized;
+    assert!(
+        !calendar_initialized,
+        "a running finite worker counted as initialized"
+    );
+    assert_eq!(
+        dependent_phase,
+        miju_services::report::ServicePhase::Waiting
+    );
+    release.notify_one();
+    assert!(bounded(app.wait()).await.unwrap().is_success());
+    assert!(
+        !consumer_started_while_job_running.load(SeqCst),
+        "a dependent of a finite worker started before the worker was exhausted and drained"
+    );
+}
+
+// A backend that, after one empty poll, takes its job off the queue, has the
+// application stopped from another thread, waits until the driver has asked
+// the service to stop (closing admission), and only then hands the job over.
+struct StopDuringDequeue {
+    yielded: bool,
+    jobs: VecDeque<u32>,
+    handle: Arc<Mutex<Option<AppHandle>>>,
+    reached_stopping: Arc<AtomicBool>,
+}
+
+impl Backend for StopDuringDequeue {
+    type Task = Task<u32>;
+    type Error = io::Error;
+
+    fn poll_ready(&mut self, _: &mut Context<'_>, _: &WorkerContext) -> Poll<io::Result<()>> {
+        Poll::Ready(Ok(()))
+    }
+
+    fn poll_next(
+        &mut self,
+        cx: &mut Context<'_>,
+        _: &WorkerContext,
+    ) -> Poll<Option<io::Result<Task<u32>>>> {
+        if !self.yielded {
+            // Yield once so the driver is not parked in this worker's local slot.
+            self.yielded = true;
+            cx.waker().wake_by_ref();
+            return Poll::Pending;
+        }
+        let Some(job) = self.jobs.pop_front() else {
+            return Poll::Pending;
+        };
+        let handle = self.handle.lock().unwrap().clone();
+        if let Some(handle) = handle {
+            let observer = handle.observer();
+            std::thread::spawn(move || handle.stop()).join().unwrap();
+            let deadline = std::time::Instant::now() + Duration::from_secs(2);
+            while std::time::Instant::now() < deadline {
+                if observer.snapshot().service("jobs").unwrap().phase
+                    == miju_services::report::ServicePhase::Stopping
+                {
+                    self.reached_stopping.store(true, SeqCst);
+                    break;
+                }
+                std::thread::sleep(Duration::from_millis(1));
+            }
+        }
+        Poll::Ready(Some(Ok(Task::new(job))))
+    }
+
+    fn poll_close(&mut self, _: &mut Context<'_>, _: &WorkerContext) -> Poll<io::Result<()>> {
+        Poll::Ready(Ok(()))
+    }
+}
+
+impl BackendConfig for StopDuringDequeue {
+    type Args = u32;
+    type Config = ();
+    type Kind = Ephemeral;
+    type Layer = tower::layer::util::Identity;
+    type Id = RandomId;
+
+    fn config(&self) -> &() {
+        &()
+    }
+
+    fn middleware(&mut self, _: &mut WorkerContext) -> Self::Layer {
+        tower::layer::util::Identity::new()
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_dequeued_job_runs_when_stop_closes_admission_before_the_executor_call() {
+    let handle_slot = Arc::new(Mutex::new(None));
+    let handled = Arc::new(AtomicUsize::new(0));
+    let reached_stopping = Arc::new(AtomicBool::new(false));
+    let backend = StopDuringDequeue {
+        yielded: false,
+        jobs: VecDeque::from([1]),
+        handle: handle_slot.clone(),
+        reached_stopping: reached_stopping.clone(),
+    };
+    let mut app = App::new();
+    {
+        let handled = handled.clone();
+        app.service(
+            "jobs",
+            worker(move |seat| {
+                WorkerBuilder::new(&seat)
+                    .backend(backend)
+                    .parallelize(seat.executor())
+                    .build(move |_job: u32| {
+                        let handled = handled.clone();
+                        async move {
+                            handled.fetch_add(1, SeqCst);
+                        }
+                    })
+                    .stream()
+            }),
+        );
+    }
+    let app = app.start().unwrap();
+    *handle_slot.lock().unwrap() = Some(app.clone());
+    let report = bounded(app.wait()).await.unwrap();
+    assert!(
+        reached_stopping.load(SeqCst),
+        "the service never reached Stopping before the job was handed over"
+    );
+    let service = report.service("jobs").unwrap();
+    let stats = service.detail::<MijuStats>().unwrap();
+    assert_eq!(
+        handled.load(SeqCst),
+        1,
+        "a dequeued job was dropped without running"
+    );
+    assert_eq!(stats.job_errors(), 0);
+    assert!(report.is_success());
+}
+
+async fn panicking_job(stop_window: bool) -> (Arc<miju_services::Report>, bool) {
+    let handle_slot = Arc::new(Mutex::new(None));
+    let reached_stopping = Arc::new(AtomicBool::new(false));
+    let backend = StopDuringDequeue {
+        yielded: false,
+        jobs: VecDeque::from([1]),
+        handle: handle_slot.clone(),
+        reached_stopping: reached_stopping.clone(),
+    };
+    let mut app = App::new();
+    app.service(
+        "jobs",
+        worker(move |seat| {
+            WorkerBuilder::new(&seat)
+                .backend(backend)
+                .parallelize(seat.executor())
+                .build(move |job: u32| async move {
+                    if job == 1 {
+                        panic!("job panics");
+                    }
+                })
+                .stream()
+        }),
+    );
+    let app = app.start().unwrap();
+    if stop_window {
+        *handle_slot.lock().unwrap() = Some(app.clone());
+    } else {
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        app.stop();
+    }
+    let report = bounded(app.wait()).await.unwrap();
+    (report, reached_stopping.load(SeqCst))
+}
+
+// A panicking job is a lost job, not a failure of the worker, whether it ran
+// as managed work or inside the stream because stop had closed admission.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_panicking_job_is_contained_whether_or_not_stop_closed_admission() {
+    for stop_window in [false, true] {
+        let (report, reached_stopping) = panicking_job(stop_window).await;
+        assert_eq!(
+            reached_stopping, stop_window,
+            "the stop window was not exercised"
+        );
+        assert!(report.is_success(), "stop window {stop_window}: {report}");
+        let stats = report
+            .service("jobs")
+            .unwrap()
+            .detail::<MijuStats>()
+            .unwrap();
+        assert_eq!(stats.job_errors(), 1, "stop window {stop_window}");
+    }
+}

@@ -27,8 +27,9 @@ source-compatible with 0.2; the JNI Java declarations and codes are unchanged.
 - `periodic::every` and `.on_grid()` replace `fixed_delay` and
   `fixed_rate_skip`; rounds run inside the service root.
 - The miju adapter builds workers on a `Seat`: `worker(|seat| ..)` and
-  `monitor(|seat| ..)`. Jobs run through a managed executor, so the service
-  drains only after every handler has finished.
+  `monitor(|seat| ..)`. Jobs run inside the stream, or as managed work with
+  `.parallelize(seat.executor())`; either way the service drains only after
+  every handler has finished.
 
 ### Behaviour changes
 

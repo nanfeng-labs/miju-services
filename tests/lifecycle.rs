@@ -1425,3 +1425,92 @@ fn queued_blocking_work_stopped_before_runtime_shutdown_is_not_called() {
         "a lost driver must not produce a report"
     );
 }
+
+// ready() from a finite provider does not make it usable before it drains.
+#[tokio::test]
+async fn ready_from_a_finite_provider_does_not_start_its_dependents_early() {
+    let release = Arc::new(Notify::new());
+    let seen: Arc<std::sync::Mutex<Option<std::result::Result<u32, ResourceError>>>> =
+        Arc::default();
+    let mut app = App::new();
+    let store = {
+        let release = release.clone();
+        app.resource("store", move |ctx| async move {
+            ctx.ready(); // e.g. an adapter or helper that reports ready
+            release.notified().await;
+            Ok::<u32, BoxError>(7)
+        })
+    };
+    {
+        let (store, seen) = (store.clone(), seen.clone());
+        app.service_fn(
+            Spec::new("consumer").finite().after(&store),
+            move |ctx| async move {
+                *seen.lock().unwrap() = Some(store.get(&ctx));
+                Ok(())
+            },
+        );
+    }
+    let app = app.start().unwrap();
+    for _ in 0..50 {
+        tokio::task::yield_now().await;
+    }
+    release.notify_one();
+    let report = bounded(app.wait()).await.unwrap();
+    assert!(
+        matches!(*seen.lock().unwrap(), Some(Ok(7))),
+        "declared consumer did not find the value"
+    );
+    assert!(report.is_success());
+}
+
+// The largest capacity the API accepts must not overflow the gate.
+#[tokio::test]
+async fn the_largest_capacity_does_not_overflow() {
+    let mut app = App::new();
+    app.service_fn(
+        Spec::new("s").capacity(std::num::NonZeroUsize::MAX),
+        |ctx| async move {
+            ctx.ready();
+            ctx.stopping().await;
+            Ok(())
+        },
+    );
+    let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| app.start()));
+    let handle = match r {
+        Err(_) => panic!("App::start panicked for capacity std::num::NonZeroUsize::MAX"),
+        Ok(h) => h.unwrap(),
+    };
+    bounded(handle.ready()).await.unwrap();
+    assert!(bounded(handle.shutdown()).await.unwrap().is_success());
+}
+
+// A provider ending after the application stop, before its own, is not early.
+#[tokio::test]
+async fn a_provider_ending_after_the_application_stop_is_not_exited_early() {
+    let (tx, mut rx) = tokio::sync::mpsc::channel::<u32>(8);
+    let mut app = App::new();
+    app.service_fn("writer", move |ctx| async move {
+        ctx.ready();
+        while let Some(_item) = rx.recv().await {}
+        Ok(())
+    });
+    app.service_fn(
+        Spec::new("producer").after("writer"),
+        move |ctx| async move {
+            let tx = tx;
+            ctx.ready();
+            tx.send(1).await?;
+            ctx.stopping().await;
+            drop(tx);
+            Ok(())
+        },
+    );
+    let handle = app.start().unwrap();
+    bounded(handle.ready()).await.unwrap();
+    let report = bounded(handle.shutdown()).await.unwrap();
+    assert!(
+        report.is_success(),
+        "orderly stop reported as failure: {report}"
+    );
+}

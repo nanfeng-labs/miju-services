@@ -217,7 +217,8 @@ impl Scope {
     pub(crate) fn new(capacity: usize, runtime: Handle, wake: Arc<Notify>) -> Self {
         Self(Arc::new(ScopeInner {
             // One more than the work capacity: the root holds a count too.
-            gate: Gate::new(capacity as u64 + 1),
+            // Saturating: `NonZeroUsize::MAX` must not wrap to zero.
+            gate: Gate::new((capacity as u64).saturating_add(1)),
             registry: Registry::default(),
             stop: CancellationToken::new(),
             runtime,
@@ -254,7 +255,27 @@ impl Scope {
         T: Send + 'static,
         E: Into<BoxError> + Send + 'static,
     {
-        self.spawn_with(name.into(), work, || {})
+        self.spawn_with(name.into(), work, true, || {})
+            .map_err(|(rejected, _work)| rejected)
+    }
+
+    /// Like [`Scope::spawn`], but the work runs even if stop arrives before
+    /// its first poll, and a rejected future is handed back. For work an
+    /// outside scheduler has already handed over and considers in flight,
+    /// such as a job miju dispatched to `Seat::executor`. It can still be
+    /// aborted after the grace period.
+    #[cfg(feature = "miju")]
+    pub(crate) fn spawn_dispatched<F, T, E>(
+        &self,
+        name: impl Into<Label>,
+        work: F,
+    ) -> Result<Work<T>, (Rejected, F)>
+    where
+        F: Future<Output = Result<T, E>> + Send + 'static,
+        T: Send + 'static,
+        E: Into<BoxError> + Send + 'static,
+    {
+        self.spawn_with(name.into(), work, false, || {})
     }
 
     /// The four admission steps, with a seam between spawn and install that
@@ -263,15 +284,20 @@ impl Scope {
         &self,
         label: Label,
         work: F,
+        cancel_unstarted: bool,
         between_spawn_and_install: impl FnOnce(),
-    ) -> Result<Work<T>, Rejected>
+    ) -> Result<Work<T>, (Rejected, F)>
     where
         F: Future<Output = Result<T, E>> + Send + 'static,
         T: Send + 'static,
         E: Into<BoxError> + Send + 'static,
     {
         // 1 and 2: admit, then name the work before anything can run under it.
-        let lease = self.admit(label.clone(), Kind::Task, None)?;
+        // A refused future goes back to the caller unpolled.
+        let lease = match self.admit(label.clone(), Kind::Task, None) {
+            Ok(lease) => lease,
+            Err(rejected) => return Err((rejected, work)),
+        };
         let key = lease.key;
         let (sender, receiver) = slot::slot();
         // 3: spawn. On a multi-thread runtime the task may start right away.
@@ -285,7 +311,7 @@ impl Scope {
                     lease,
                     label,
                 }),
-                stop: Some(self.0.stop.clone()),
+                stop: cancel_unstarted.then(|| self.0.stop.clone()),
                 polled: false,
             })
             .abort_handle();
@@ -748,6 +774,7 @@ mod tests {
                         started.store(true, Ordering::SeqCst);
                         std::future::pending::<Result<(), BoxError>>().await
                     },
+                    true,
                     move || {
                         reached.send(()).unwrap();
                         let _ = resumed.recv();
@@ -767,7 +794,9 @@ mod tests {
             "admitted work is listed before its handle is installed"
         );
         resume.send(()).unwrap();
-        let work = submitter.join().unwrap().unwrap();
+        let Ok(work) = submitter.join().unwrap() else {
+            panic!("a fresh scope admits the work")
+        };
 
         let outcome = tokio::time::timeout(Duration::from_secs(5), work)
             .await

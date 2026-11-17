@@ -23,7 +23,7 @@
 
 use crate::{
     SharedError,
-    contain::drop_contained,
+    contain::{drop_contained, panic_message},
     scope::{Rejected, Scope, Work, WorkError},
     service::{Context, Service},
 };
@@ -34,6 +34,7 @@ use std::{
     convert::Infallible,
     fmt,
     future::{Future, poll_fn},
+    panic::{AssertUnwindSafe, catch_unwind},
     pin::{Pin, pin},
     sync::{
         Arc, Mutex, OnceLock,
@@ -84,10 +85,18 @@ impl Seat {
     }
 
     /// An executor for miju's `parallelize`: each job becomes managed work of
-    /// this service and holds a lease until it ends.
+    /// this service and holds a lease until it ends. A job miju has dispatched
+    /// still runs when stop arrives first: before its first poll, or before
+    /// the executor is called. In the second case admission is closed, so the
+    /// job runs inside the future miju polls in the worker's stream, owned by
+    /// the root like an in-stream job: the grace period's abort cuts it off,
+    /// and so does anything else that ends the stream early, such as a second
+    /// backend error. This relies on miju polling the job inside the service's
+    /// stream, as `parallelize` in the worker does. A job's panic is contained
+    /// on both paths and reported as a lost job.
     ///
     /// Add `parallelize` before `retry` and `timeout`, as miju recommends, so
-    /// a retry chain is one job. A job the scope rejects (closed or full) is
+    /// a retry chain is one job. A job refused because the scope is full is
     /// reported by miju as a failed job; keep miju's `concurrency` below the
     /// service's capacity.
     pub fn executor<Fut>(
@@ -100,9 +109,17 @@ impl Seat {
         let scope = self.scope.clone();
         move |job| {
             ManagedJob(
-                match scope.spawn("miju-job", async move { Ok::<_, Infallible>(job.await) }) {
+                // Dispatched means in flight for miju: it runs even when stop
+                // arrives before its first poll.
+                match scope
+                    .spawn_dispatched("miju-job", async move { Ok::<_, Infallible>(job.await) })
+                {
                     Ok(work) => JobState::Running(work),
-                    Err(rejected) => JobState::Rejected(Some(rejected)),
+                    // Stop closed admission after miju took the job: run it
+                    // inside this future, which miju polls in the stream, so
+                    // the root owns it as it would an in-stream job.
+                    Err((Rejected::Closed, job)) => JobState::Inline(Box::pin(job)),
+                    Err((rejected, _job)) => JobState::Rejected(Some(rejected)),
                 },
             )
         }
@@ -122,6 +139,7 @@ pub struct ManagedJob<T>(JobState<T>);
 
 enum JobState<T> {
     Running(Work<T>),
+    Inline(Pin<Box<dyn Future<Output = Result<T, Infallible>> + Send>>),
     Rejected(Option<Rejected>),
 }
 
@@ -135,11 +153,29 @@ impl<T> Future for ManagedJob<T> {
     type Output = Result<T, JobError>;
 
     fn poll(self: Pin<&mut Self>, cx: &mut TaskContext<'_>) -> Poll<Self::Output> {
-        match &mut self.get_mut().0 {
+        let state = &mut self.get_mut().0;
+        if let JobState::Inline(job) = state {
+            // Contained as on the managed path: a panicking job is a lost job,
+            // not a failure of the stream that polls it.
+            let polled = catch_unwind(AssertUnwindSafe(|| job.as_mut().poll(cx)));
+            return match polled {
+                Ok(Poll::Pending) => Poll::Pending,
+                Ok(Poll::Ready(Ok(output))) => Poll::Ready(Ok(output)),
+                Ok(Poll::Ready(Err(never))) => match never {},
+                Err(payload) => {
+                    drop_contained(std::mem::replace(state, JobState::Rejected(None)));
+                    Poll::Ready(Err(JobError::Lost(WorkError::Panicked(panic_message(
+                        payload,
+                    )))))
+                }
+            };
+        }
+        match state {
             JobState::Running(work) => Pin::new(work).poll(cx).map_err(JobError::Lost),
             JobState::Rejected(rejected) => Poll::Ready(Err(JobError::Rejected(
                 rejected.take().expect("polled after completion"),
             ))),
+            JobState::Inline(_) => unreachable!("handled above"),
         }
     }
 }
@@ -147,7 +183,7 @@ impl<T> Future for ManagedJob<T> {
 /// Why a parallelized job produced no result of its own.
 #[derive(Clone, Debug, thiserror::Error)]
 pub enum JobError {
-    /// The service's scope was closed or full; the job never ran.
+    /// The service's scope was full; the job never ran.
     #[error("job rejected: {0}")]
     Rejected(Rejected),
     /// The job was cancelled, aborted or panicked.
@@ -264,7 +300,10 @@ impl std::error::Error for JobFailure {
 /// The factory runs once, when the service starts, and must build the worker
 /// with `WorkerBuilder::new(&seat)`. The service is ready at the worker's real
 /// `Start`, which does not mean a remote backend is ready. Register a finite
-/// source, such as a finite schedule, with `Spec::finite()`.
+/// source, such as a finite schedule, with `Spec::finite()`: it is then
+/// initialized, and its dependents start, only once the source is exhausted
+/// and the service has drained. If it is required, the application is not
+/// ready before that.
 pub fn worker<F, S>(factory: F) -> Worker<F>
 where
     F: FnOnce(Seat) -> S + Send + 'static,
@@ -277,7 +316,8 @@ where
 ///
 /// Stop shuts the monitor down and waits for the same `run()` to return. The
 /// service is ready once `run()` has been polled, when miju has started every
-/// registered worker. A worker's failure can be delayed by its siblings; that
+/// registered worker; a finite monitor is initialized when `run()` has
+/// returned successfully and the service has drained. A worker's failure can be delayed by its siblings; that
 /// is the Monitor's grouping. Register workers as separate services when each
 /// failure must stop the application at once.
 pub fn monitor<F>(factory: F) -> MonitorService<F>
@@ -397,10 +437,11 @@ where
         let mut run = pin!(monitor.run());
         // The first poll starts every registered worker.
         let first = poll_fn(|cx| Poll::Ready(run.as_mut().poll(cx))).await;
-        ctx.ready();
         let result = match first {
+            // Finished on its first poll: never report a finished monitor ready.
             Poll::Ready(result) => result,
             Poll::Pending => {
+                ctx.ready();
                 tokio::select! {
                     biased;
                     result = &mut run => result,

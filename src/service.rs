@@ -116,11 +116,13 @@ impl Context {
     ///
     /// Health becomes `Healthy` unless it was declared explicitly. Repeated
     /// calls change nothing. Calls after stop was requested, or after the root
-    /// has returned, are ignored.
+    /// has returned, are ignored, and so are calls from a finite service: it
+    /// is initialized by succeeding and draining, so its dependents never
+    /// start before that.
     pub fn ready(&self) {
         {
             let mut state = self.cell.state();
-            if self.is_stopping() || state.root.is_some() {
+            if self.cell.finite || self.is_stopping() || state.root.is_some() {
                 return;
             }
             state.initialized = true;
