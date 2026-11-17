@@ -1,17 +1,15 @@
-//! A required initialization failure exits without waiting for the host signal.
+//! A required initialization failure ends the application without a signal.
 
-use miju_services::{App, BoxError};
-use std::{future::pending, io};
+use miju_services::{App, Result};
+use std::io;
 
 #[tokio::main(flavor = "current_thread")]
-async fn main() -> Result<(), BoxError> {
-    // The application exits on this required service failure without waiting for a signal.
-    App::builder()
-        .service_fn("device", |_context| async {
-            Err(io::Error::new(io::ErrorKind::ConnectionRefused, "device unavailable").into())
-        })
-        .build()?
-        .run_until(pending::<Result<(), io::Error>>())
-        .await?;
+async fn main() -> Result {
+    let mut app = App::new();
+    app.service_fn("device", |_ctx| async {
+        Err(io::Error::new(io::ErrorKind::ConnectionRefused, "device unavailable").into())
+    });
+    // No stop source: the failure itself ends the run, and the error carries the report.
+    app.run().await?;
     Ok(())
 }

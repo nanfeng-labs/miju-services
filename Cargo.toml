@@ -4,12 +4,16 @@ version = "0.2.0-beta.6"
 edition = "2024"
 rust-version = "1.89"
 license = "MIT"
+# Unported tests and examples stay on disk and are listed again as they are ported.
+autotests = false
+autoexamples = false
 repository = "https://github.com/nanfeng-labs/miju-services"
 description = "Application assembly, service lifecycles, owned work, and resource cleanup for miju"
 include = ["src/**/*.rs", "examples/**/*.rs", "examples/jni/Cargo.toml.in", "examples/jni/Cargo.lock", "examples/jni/README.md", "examples/jni/run.py", "examples/jni/java/**/*.java", "examples/configured_app/README.md", "examples/configured_app/settings.toml", "tests/**/*.rs", "Cargo.toml", "Cargo.lock", "README.md", "README.zh-CN.md", "LICENSE", "CHANGELOG.md", "assets/**"]
 
 [features]
-default = ["miju", "periodic"]
+# The adapters return as they are ported to the v0.3.0 core; see src/lib.rs.
+default = []
 ## Attach miju Workers and Monitors without replacing their execution policy.
 miju = ["dep:miju", "dep:futures-util"]
 ## Run serial periodic operations as service-owned work.
@@ -23,7 +27,8 @@ docsrs = ["dep:document-features"]
 
 [dependencies]
 tokio = { version = "1.54.1", features = ["rt", "sync", "time", "macros"] }
-tokio-util = { version = "0.7.20", features = ["rt"] }
+tokio-util = "0.7.20"
+pin-project-lite = "0.2.16"
 thiserror = "2.0.21"
 tracing = { version = "0.1.44", default-features = false, optional = true }
 document-features = { version = "0.2.12", optional = true }
@@ -62,22 +67,30 @@ rustdoc-args = ["--cfg", "docsrs"]
 [package.metadata.cargo-udeps.ignore]
 normal = ["document-features"]
 
-[[example]]
-name = "miju_worker"
-required-features = ["miju"]
+[[test]]
+name = "work"
+path = "tests/work.rs"
+
+[[test]]
+name = "lifecycle"
+path = "tests/lifecycle.rs"
 
 [[example]]
-name = "miju_monitor"
-required-features = ["miju"]
+name = "basic"
+path = "examples/basic.rs"
 
 [[example]]
-name = "periodic"
-required-features = ["periodic"]
+name = "managed_work"
+path = "examples/managed_work.rs"
 
 [[example]]
-name = "cron_worker"
-required-features = ["miju"]
+name = "shared_resource"
+path = "examples/shared_resource.rs"
 
 [[example]]
-name = "bounded_queue_rounds"
-required-features = ["miju"]
+name = "startup_failure"
+path = "examples/startup_failure.rs"
+
+[[example]]
+name = "embedded_runtime"
+path = "examples/embedded_runtime.rs"

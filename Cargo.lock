@@ -725,6 +725,7 @@ dependencies = [
  "jni",
  "miju",
  "miju-cron",
+ "pin-project-lite",
  "serde",
  "thiserror",
  "tokio",
@@ -1223,7 +1224,6 @@ dependencies = [
  "bytes",
  "futures-core",
  "futures-sink",
- "futures-util",
  "pin-project-lite",
  "tokio",
 ]

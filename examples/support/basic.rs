@@ -1,15 +1,12 @@
-use miju_services::{BoxError, ServiceContext};
+use miju_services::{Context, Result};
 use std::time::Duration;
 
-pub(crate) async fn heartbeat(context: ServiceContext) -> Result<(), BoxError> {
-    context.ready();
+pub(crate) async fn heartbeat(ctx: Context) -> Result {
+    ctx.ready();
     loop {
         tokio::select! {
-            _ = context.stopping() => break,
-            _ = tokio::time::sleep(Duration::from_secs(5)) => {
-                println!("heartbeat");
-            }
+            _ = ctx.stopping() => return Ok(()),
+            _ = tokio::time::sleep(Duration::from_secs(5)) => println!("heartbeat"),
         }
     }
-    Ok(())
 }

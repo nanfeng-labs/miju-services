@@ -1,6 +1,5 @@
-use miju_services::{App, BoxError, BuildError, ExitReport, RunError, Service, ServiceContext};
+use miju_services::{App, BoxError, Context, Resource, Result, Service, Spec};
 use std::{
-    future::Future,
     io,
     sync::{
         Arc,
@@ -39,96 +38,55 @@ impl CounterStore {
         self.closed.load(Ordering::SeqCst)
     }
 
-    pub(crate) async fn close(&self) -> io::Result<()> {
+    async fn close(&self) -> io::Result<()> {
         self.closed.store(true, Ordering::SeqCst);
         Ok(())
     }
 }
 
-#[derive(Debug)]
+/// A service with its own settings, a shared resource and a concrete error.
 pub(crate) struct CountingService {
     settings: Settings,
-    store: Arc<CounterStore>,
-}
-
-impl CountingService {
-    pub(crate) fn new(settings: Settings, store: Arc<CounterStore>) -> Self {
-        Self { settings, store }
-    }
+    store: Resource<Arc<CounterStore>>,
 }
 
 impl Service for CountingService {
-    type Error = io::Error;
+    type Error = BoxError;
 
-    async fn run(self, context: ServiceContext) -> Result<(), Self::Error> {
-        if self.settings.interval.is_zero() {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                "interval must be positive",
-            ));
-        }
-        context.ready();
+    async fn run(self, ctx: Context) -> Result {
+        let store = self.store.get(&ctx)?;
+        ctx.ready();
         loop {
             tokio::select! {
-                _ = context.stopping() => break,
+                _ = ctx.stopping() => return Ok(()),
                 _ = tokio::time::sleep(self.settings.interval) => {
-                    self.store.count.fetch_add(self.settings.increment, Ordering::SeqCst);
+                    store.count.fetch_add(self.settings.increment, Ordering::SeqCst);
                 }
             }
+        }
+    }
+
+    fn check(&self) -> Result {
+        if self.settings.interval.is_zero() {
+            return Err("interval must be positive".into());
         }
         Ok(())
     }
 }
 
-pub(crate) fn assemble(settings: Settings, store: Arc<CounterStore>) -> Result<App, BuildError> {
-    let cleanup = store.clone();
-    App::builder()
-        .cleanup("counter-store", move || async move {
-            cleanup.close().await?;
-            Ok(())
-        })
-        .service("counter", CountingService::new(settings, store))
-        .build()
-}
-
-/// Bootstrap retains access for rollback until the lifecycle driver accepts the app.
-pub(crate) async fn run<F, E>(
-    settings: Settings,
-    store: Arc<CounterStore>,
-    stop: F,
-) -> Result<Arc<ExitReport>, BootstrapError>
-where
-    F: Future<Output = Result<(), E>> + Send,
-    E: Into<BoxError> + Send + 'static,
-{
-    let app = match assemble(settings, store.clone()) {
-        Ok(app) => app,
-        Err(error) => {
-            return Err(BootstrapError {
-                source: error.into(),
-                rollback: store.close().await.err(),
-            });
-        }
-    };
-    match app.run_until(stop).await {
-        Ok(report) => Ok(report),
-        Err(error) => {
-            let rollback = if matches!(&error, RunError::Start(_)) {
-                store.close().await.err()
-            } else {
-                None // The accepted driver owns cleanup, including on service failure.
-            };
-            Err(BootstrapError {
-                source: error.into(),
-                rollback,
-            })
-        }
-    }
-}
-
-#[derive(Debug, thiserror::Error)]
-#[error("bootstrap failed: {source}; rollback error: {rollback:?}")]
-pub(crate) struct BootstrapError {
-    pub(crate) source: BoxError,
-    pub(crate) rollback: Option<io::Error>,
+/// The store is handed in already built. It becomes the application's
+/// responsibility only when the `store` service runs, which is also where its
+/// close is registered: one place, and nothing to roll back before start.
+pub(crate) fn assemble(settings: Settings, store: Arc<CounterStore>) -> App {
+    let mut app = App::new();
+    let store = app.resource("store", move |ctx| async move {
+        let closing = store.clone();
+        ctx.defer("counter-store", async move { closing.close().await })?;
+        Ok(store)
+    });
+    app.service(
+        Spec::new("counter").after(&store),
+        CountingService { settings, store },
+    );
+    app
 }

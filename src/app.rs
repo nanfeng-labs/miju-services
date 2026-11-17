@@ -1,256 +1,187 @@
-//! Assemble once, then run on the application's Tokio runtime.
+//! Assembling and running an application.
 //!
-//! [`App::run_until`] handles ordinary applications. Embedded hosts can retain an
-//! [`AppHandle`] for readiness, bounded observation, and repeated actual-completion
-//! waits. The runtime must remain alive until the final report arrives.
+//! Register services, then run. Nothing a service owns is acquired before
+//! start is accepted, so an unstarted [`App`] holds no resource that needs an
+//! asynchronous close through this library.
 #![forbid(unsafe_code)]
-
-mod driver;
 
 use crate::{
     BoxError,
-    cleanup::{Close, Registry},
-    observe::{AppObserver, DriverLost, ReadyError, ShutdownProgress},
-    report::{AppSnapshot, ExitReport, Health, Phase},
-    service::{Criticality, Service, ServiceContext, ServiceSpec},
-    task,
+    driver::{Driver, Entry},
+    observe::{AppHandle, Core, Lost},
+    report::Report,
+    scope::Scope,
+    service::{Context, Resource, Service, ServiceCell},
 };
 use std::{
-    collections::{BTreeMap, BTreeSet},
+    collections::BTreeMap,
     fmt,
     future::Future,
-    pin::Pin,
+    num::NonZeroUsize,
     sync::{Arc, Mutex},
     time::Duration,
 };
 use tokio::{runtime::Handle, sync::Notify, time::Instant};
 
-type Entry = Box<
-    dyn FnOnce(ServiceContext) -> Pin<Box<dyn Future<Output = Result<(), BoxError>> + Send>> + Send,
->;
-
-struct Registration {
-    spec: ServiceSpec,
-    run: Entry,
-}
-
-/// Per-service initialization and first-stop budgets.
+/// How a service is registered. A plain name gives every default: required,
+/// resident, no dependencies, room for 1024 pieces of work.
 #[derive(Clone, Debug)]
-pub struct AppOptions {
-    /// Time from Resident service admission until `ready()`.
-    ///
-    /// Finite services use successful completion and actual drain as their
-    /// initialization gate; their business duration is not bounded by this value.
-    pub startup_timeout: Duration,
-    /// Shared cooperative stop interval, starting at the first stop request.
-    ///
-    /// Providers receive only the remainder after their consumers drain, possibly
-    /// no cooperative turn. Register required asynchronous teardown as cleanup;
-    /// this application-wide budget is not renewed for each provider.
-    pub shutdown_grace: Duration,
-    /// Extra confirmation interval before latching historical budget overrun.
-    pub abort_wait: Duration,
-    /// Number of recent completed work reports retained per service.
-    pub recent_results: usize,
+pub struct Spec {
+    name: Arc<str>,
+    after: Vec<Arc<str>>,
+    optional: bool,
+    finite: bool,
+    capacity: NonZeroUsize,
 }
 
-impl Default for AppOptions {
-    fn default() -> Self {
+impl Spec {
+    /// A required, resident service with the default work capacity.
+    pub fn new(name: impl Into<String>) -> Self {
         Self {
-            startup_timeout: Duration::from_secs(30),
-            shutdown_grace: Duration::from_secs(30),
-            abort_wait: Duration::from_secs(1),
-            recent_results: 64,
+            name: Arc::from(name.into()),
+            after: Vec::new(),
+            optional: false,
+            finite: false,
+            capacity: NonZeroUsize::new(1024).expect("1024 is not zero"),
         }
+    }
+
+    /// Start after `provider` is initialized, and keep it running until this
+    /// service has drained. Accepts a service name or a [`Resource`].
+    #[must_use]
+    pub fn after(mut self, provider: impl DependsOn) -> Self {
+        self.after.push(provider.provider());
+        self
+    }
+
+    /// A failure stops and drains only this service, and degrades health.
+    #[must_use]
+    pub fn optional(mut self) -> Self {
+        self.optional = true;
+        self
+    }
+
+    /// The root is a one-off step: it is initialized by succeeding and
+    /// draining, and has no startup timeout.
+    #[must_use]
+    pub fn finite(mut self) -> Self {
+        self.finite = true;
+        self
+    }
+
+    /// How much work and how many leases may be outstanding at once.
+    #[must_use]
+    pub fn capacity(mut self, work: NonZeroUsize) -> Self {
+        self.capacity = work;
+        self
     }
 }
 
-/// An invalid assembly; no service entry was invoked.
-#[derive(Clone, Debug, thiserror::Error, PartialEq, Eq)]
-pub enum BuildError {
-    /// An application must register at least one service.
+impl From<&str> for Spec {
+    fn from(name: &str) -> Self {
+        Self::new(name)
+    }
+}
+
+impl From<String> for Spec {
+    fn from(name: String) -> Self {
+        Self::new(name)
+    }
+}
+
+/// Something a service can be registered `after`.
+pub trait DependsOn {
+    /// The provider's registered name.
+    fn provider(&self) -> Arc<str>;
+}
+
+impl DependsOn for &str {
+    fn provider(&self) -> Arc<str> {
+        Arc::from(*self)
+    }
+}
+
+impl DependsOn for String {
+    fn provider(&self) -> Arc<str> {
+        Arc::from(self.as_str())
+    }
+}
+
+impl<T> DependsOn for &Resource<T> {
+    fn provider(&self) -> Arc<str> {
+        Arc::from(self.name())
+    }
+}
+
+/// Why an assembly cannot be started. No service was invoked.
+#[derive(Clone, Debug, Eq, PartialEq, thiserror::Error)]
+pub enum AssemblyError {
+    /// No service was registered.
     #[error("no services registered")]
     Empty,
-    /// Names must contain a non-whitespace character.
-    #[error("service name is empty")]
+    /// A name is empty or only whitespace.
+    #[error("a service name is empty")]
     EmptyName,
-    /// Service identities must be unique within one application.
+    /// Two services share a name.
     #[error("duplicate service: {0}")]
     Duplicate(String),
-    /// A dependency refers to a name that was not registered.
+    /// A dependency names a service that was not registered.
     #[error("{service} depends on unknown service {provider}")]
     UnknownDependency {
-        /// Dependent name.
+        /// The dependent service.
         service: String,
-        /// Missing provider name.
+        /// The missing provider.
         provider: String,
     },
-    /// One registration repeats the same dependency.
+    /// A service lists the same provider twice.
     #[error("{service} repeats dependency {provider}")]
     DuplicateDependency {
-        /// Dependent name.
+        /// The dependent service.
         service: String,
-        /// Repeated provider name.
+        /// The repeated provider.
         provider: String,
     },
-    /// Optional services cannot provide a required startup gate.
+    /// An optional service cannot be something others wait for.
     #[error("optional service cannot be a dependency provider: {0}")]
     OptionalProvider(String),
-    /// Dependency cycle, including self-dependency.
+    /// The dependencies form a cycle.
     #[error("service dependencies contain a cycle")]
     Cycle,
-    /// A zero or unrepresentable budget cannot define a valid deadline.
+    /// A budget is zero or cannot be added to the clock.
     #[error("invalid lifecycle budget: {0}")]
     InvalidBudget(&'static str),
+    /// A service rejected its own settings.
+    #[error("service {service} is misconfigured: {error}")]
+    Service {
+        /// The service's name.
+        service: String,
+        /// What its `check` reported.
+        error: String,
+    },
 }
 
-/// Service and cleanup assembly. Building does not invoke user entries.
-pub struct AppBuilder {
-    options: AppOptions,
-    services: Vec<Registration>,
-    cleanup: Vec<(String, Close)>,
+struct Registration {
+    spec: Spec,
+    entry: Entry,
+    checked: Result<(), String>,
 }
 
-impl fmt::Debug for AppBuilder {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("AppBuilder")
-            .field("options", &self.options)
-            .field(
-                "services",
-                &self.services.iter().map(|s| &s.spec).collect::<Vec<_>>(),
-            )
-            .finish_non_exhaustive()
-    }
+struct Plan {
+    providers: Vec<Vec<usize>>,
+    ranks: Vec<usize>,
 }
 
-impl AppBuilder {
-    /// Override lifecycle budgets; [`build`](Self::build) validates them together.
-    #[must_use]
-    pub fn options(mut self, options: AppOptions) -> Self {
-        self.options = options;
-        self
-    }
-
-    /// Register an object or generic function adapter with a name or advanced policy.
-    #[must_use]
-    pub fn service<S: Service>(mut self, spec: impl Into<ServiceSpec>, service: S) -> Self {
-        self.services.push(Registration {
-            spec: spec.into(),
-            run: Box::new(move |context| task::boxed(service.run(context))),
-        });
-        self
-    }
-
-    /// Register a function with inferred `Ok(())` and the common [`BoxError`] boundary.
-    #[must_use]
-    pub fn service_fn<F, Fut>(self, spec: impl Into<ServiceSpec>, run: F) -> Self
-    where
-        F: FnOnce(ServiceContext) -> Fut + Send + 'static,
-        Fut: Future<Output = Result<(), BoxError>> + Send + 'static,
-    {
-        self.service(spec, crate::service::service_fn(run))
-    }
-
-    /// Register existing-resource close in the same LIFO stack as initialization cleanup.
-    ///
-    /// Until start succeeds, bootstrap must retain independent rollback access.
-    /// Build rejection or dropping an unstarted App does not await these actions.
-    #[must_use]
-    pub fn cleanup<F, Fut>(mut self, label: impl Into<String>, close: F) -> Self
-    where
-        F: FnOnce() -> Fut + Send + 'static,
-        Fut: Future<Output = Result<(), BoxError>> + Send + 'static,
-    {
-        self.cleanup
-            .push((label.into(), Box::new(move || task::boxed(close()))));
-        self
-    }
-
-    /// Validate names, dependency DAG, provider policy, and time budgets.
-    pub fn build(self) -> Result<App, BuildError> {
-        if self.services.is_empty() {
-            return Err(BuildError::Empty);
-        }
-        let now = Instant::now();
-        for (name, duration) in [
-            ("startup_timeout", self.options.startup_timeout),
-            ("shutdown_grace", self.options.shutdown_grace),
-        ] {
-            if duration.is_zero() || now.checked_add(duration).is_none() {
-                return Err(BuildError::InvalidBudget(name));
-            }
-        }
-        if self
-            .options
-            .shutdown_grace
-            .checked_add(self.options.abort_wait)
-            .and_then(|duration| now.checked_add(duration))
-            .is_none()
-        {
-            return Err(BuildError::InvalidBudget("shutdown_grace + abort_wait"));
-        }
-        let mut names = BTreeMap::new();
-        for (index, entry) in self.services.iter().enumerate() {
-            let name = entry.spec.id.name();
-            if name.trim().is_empty() {
-                return Err(BuildError::EmptyName);
-            }
-            if names.insert(name, index).is_some() {
-                return Err(BuildError::Duplicate(name.into()));
-            }
-        }
-        let mut dependencies = Vec::new();
-        for entry in &self.services {
-            let mut seen = BTreeSet::new();
-            let mut providers = Vec::new();
-            for provider in &entry.spec.dependencies {
-                let service = entry.spec.id.name();
-                let Some(&index) = names.get(provider.as_str()) else {
-                    return Err(BuildError::UnknownDependency {
-                        service: service.into(),
-                        provider: provider.clone(),
-                    });
-                };
-                if !seen.insert(index) {
-                    return Err(BuildError::DuplicateDependency {
-                        service: service.into(),
-                        provider: provider.clone(),
-                    });
-                }
-                if self.services[index].spec.criticality == Criticality::Optional {
-                    return Err(BuildError::OptionalProvider(provider.clone()));
-                }
-                providers.push(index);
-            }
-            dependencies.push(providers);
-        }
-        let mut visited = BTreeSet::new();
-        while visited.len() < self.services.len() {
-            let before = visited.len();
-            for (index, providers) in dependencies.iter().enumerate() {
-                if providers.iter().all(|p| visited.contains(p)) {
-                    visited.insert(index);
-                }
-            }
-            if before == visited.len() {
-                return Err(BuildError::Cycle);
-            }
-        }
-        Ok(App {
-            options: self.options,
-            services: self.services,
-            cleanup: self.cleanup,
-            dependencies,
-        })
-    }
-}
-
-/// A validated, unstarted application, consumed at successful start.
+/// An application being assembled.
 pub struct App {
-    options: AppOptions,
     services: Vec<Registration>,
-    cleanup: Vec<(String, Close)>,
-    dependencies: Vec<Vec<usize>>,
+    startup_timeout: Duration,
+    shutdown_grace: Duration,
+}
+
+impl Default for App {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl fmt::Debug for App {
@@ -260,142 +191,239 @@ impl fmt::Debug for App {
                 "services",
                 &self.services.iter().map(|s| &s.spec).collect::<Vec<_>>(),
             )
-            .finish_non_exhaustive()
-    }
-}
-
-/// Startup rejection retaining the complete unstarted assembly for recovery.
-#[derive(Debug, thiserror::Error)]
-#[error("cannot start App without a current Tokio runtime")]
-pub struct StartError {
-    #[source]
-    source: tokio::runtime::TryCurrentError,
-    app: Mutex<Box<App>>,
-}
-
-impl StartError {
-    /// Recover the unstarted App; retry on an active, time-enabled Tokio runtime.
-    pub fn into_app(self) -> App {
-        *self.app.into_inner().unwrap()
-    }
-}
-
-/// Run failure retaining original errors and any actual final report.
-#[derive(Debug, thiserror::Error)]
-pub enum RunError {
-    /// No runtime accepted the assembly; the App can be recovered.
-    #[error(transparent)]
-    Start(#[from] StartError),
-    /// No final certificate exists; an already observed stop-source error is retained.
-    #[error("lifecycle driver lost")]
-    DriverLost {
-        /// Driver loss with the last known snapshot.
-        #[source]
-        source: DriverLost,
-        /// Original stop-source failure if already observed.
-        stop_source: Option<BoxError>,
-    },
-    /// Lifecycle completed but required work or cleanup failed.
-    #[error("application lifecycle failed; inspect the final report")]
-    Failed {
-        /// Actual completion with all errors preserved.
-        report: Arc<ExitReport>,
-    },
-    /// The host stop future failed; actual cleanup still completed.
-    #[error("host stop source failed: {source}")]
-    StopSource {
-        /// Original host error.
-        #[source]
-        source: BoxError,
-        /// Actual final report, including any service failures.
-        report: Arc<ExitReport>,
-    },
-}
-
-impl RunError {
-    /// Read the final report when actual completion was observed.
-    pub fn report(&self) -> Option<&Arc<ExitReport>> {
-        match self {
-            Self::Failed { report } | Self::StopSource { report, .. } => Some(report),
-            _ => None,
-        }
+            .field("startup_timeout", &self.startup_timeout)
+            .field("shutdown_grace", &self.shutdown_grace)
+            .finish()
     }
 }
 
 impl App {
-    /// Begin an assembly with default lifecycle policy.
-    pub fn builder() -> AppBuilder {
-        AppBuilder {
-            options: AppOptions::default(),
+    /// An empty assembly with 30-second startup and stop budgets.
+    pub fn new() -> Self {
+        Self {
             services: Vec::new(),
-            cleanup: Vec::new(),
+            startup_timeout: Duration::from_secs(30),
+            shutdown_grace: Duration::from_secs(30),
         }
     }
 
-    /// Start an independent lifecycle driver on the current Tokio runtime.
+    /// Register an `async fn`, an adapter, or a type implementing [`Service`].
+    pub fn service(&mut self, spec: impl Into<Spec>, service: impl Service) -> &mut Self {
+        let checked = service.check().map_err(|error| error.to_string());
+        self.services.push(Registration {
+            spec: spec.into(),
+            entry: Box::new(move |ctx| {
+                Box::pin(async move { service.run(ctx).await.map_err(Into::into) })
+            }),
+            checked,
+        });
+        self
+    }
+
+    /// Register a closure. The bound is on this method, which is what lets
+    /// `|ctx| async move { .. }` infer its parameter type.
+    pub fn service_fn<F, Fut>(&mut self, spec: impl Into<Spec>, run: F) -> &mut Self
+    where
+        F: FnOnce(Context) -> Fut + Send + 'static,
+        Fut: Future<Output = Result<(), BoxError>> + Send + 'static,
+    {
+        self.service(spec, run)
+    }
+
+    /// Register a finite service that acquires a value for others to use.
     ///
-    /// The host must enable time and keep the runtime alive through actual completion.
-    /// This checks only for a current runtime. A custom runtime without
-    /// `enable_time()` violates that precondition and can lose the driver after
-    /// service admission; it is not a recoverable [`StartError`].
-    pub fn start(self) -> Result<AppHandle, StartError> {
-        let runtime = match Handle::try_current() {
-            Ok(runtime) => runtime,
-            Err(source) => {
-                return Err(StartError {
-                    source,
-                    app: Mutex::new(Box::new(self)),
+    /// The value is acquired only after start is accepted. Register its
+    /// cleanup with [`Context::defer`] right where it is acquired.
+    pub fn resource<T, F, Fut>(&mut self, spec: impl Into<Spec>, acquire: F) -> Resource<T>
+    where
+        T: Clone + Send + Sync + 'static,
+        F: FnOnce(Context) -> Fut + Send + 'static,
+        Fut: Future<Output = Result<T, BoxError>> + Send + 'static,
+    {
+        let spec = spec.into().finite();
+        let resource = Resource::new(spec.name.clone());
+        let published = resource.clone();
+        self.service_fn(spec, move |ctx| async move {
+            published.set(acquire(ctx).await?);
+            Ok(())
+        });
+        resource
+    }
+
+    /// How long a resident service may take to call `ready()`. Default 30 s.
+    pub fn startup_timeout(&mut self, within: Duration) -> &mut Self {
+        self.startup_timeout = within;
+        self
+    }
+
+    /// How long each service has, from its own stop request, before its root
+    /// and its asynchronous work are aborted. Default 30 s.
+    pub fn shutdown_grace(&mut self, within: Duration) -> &mut Self {
+        self.shutdown_grace = within;
+        self
+    }
+
+    /// Check names, dependencies, budgets and each service's own settings.
+    pub fn validate(&self) -> Result<(), AssemblyError> {
+        self.plan().map(|_| ())
+    }
+
+    fn plan(&self) -> Result<Plan, AssemblyError> {
+        if self.services.is_empty() {
+            return Err(AssemblyError::Empty);
+        }
+        let now = Instant::now();
+        for (name, budget) in [
+            ("startup_timeout", self.startup_timeout),
+            ("shutdown_grace", self.shutdown_grace),
+        ] {
+            if budget.is_zero() || now.checked_add(budget).is_none() {
+                return Err(AssemblyError::InvalidBudget(name));
+            }
+        }
+        let mut names = BTreeMap::new();
+        for (index, service) in self.services.iter().enumerate() {
+            let name = &*service.spec.name;
+            if name.trim().is_empty() {
+                return Err(AssemblyError::EmptyName);
+            }
+            if names.insert(name, index).is_some() {
+                return Err(AssemblyError::Duplicate(name.into()));
+            }
+        }
+        let mut providers = Vec::with_capacity(self.services.len());
+        for service in &self.services {
+            let mut declared = Vec::new();
+            for provider in &service.spec.after {
+                let Some(&index) = names.get(&**provider) else {
+                    return Err(AssemblyError::UnknownDependency {
+                        service: service.spec.name.to_string(),
+                        provider: provider.to_string(),
+                    });
+                };
+                if declared.contains(&index) {
+                    return Err(AssemblyError::DuplicateDependency {
+                        service: service.spec.name.to_string(),
+                        provider: provider.to_string(),
+                    });
+                }
+                if self.services[index].spec.optional {
+                    return Err(AssemblyError::OptionalProvider(provider.to_string()));
+                }
+                declared.push(index);
+            }
+            providers.push(declared);
+        }
+        // Rank: the length of the longest chain of providers below a service.
+        let mut ranks: Vec<Option<usize>> = vec![None; self.services.len()];
+        let mut remaining = self.services.len();
+        while remaining > 0 {
+            let before = remaining;
+            for index in 0..self.services.len() {
+                if ranks[index].is_some() {
+                    continue;
+                }
+                let below: Option<Vec<usize>> = providers[index]
+                    .iter()
+                    .map(|&provider| ranks[provider])
+                    .collect();
+                if let Some(below) = below {
+                    ranks[index] = Some(below.into_iter().max().map_or(0, |rank| rank + 1));
+                    remaining -= 1;
+                }
+            }
+            if remaining == before {
+                return Err(AssemblyError::Cycle);
+            }
+        }
+        for service in &self.services {
+            if let Err(error) = &service.checked {
+                return Err(AssemblyError::Service {
+                    service: service.spec.name.to_string(),
+                    error: error.clone(),
                 });
             }
-        };
-        let wake = Arc::new(Notify::new());
-        let shared = crate::observe::Shared::new(
-            AppSnapshot {
-                phase: Phase::Starting,
-                ready: false,
-                health: Health::Unknown,
-                services: Vec::new(),
-                current_cleanup: None,
-                pending_cleanup: Vec::new(),
-                cleanup: Vec::new(),
-                budget_exceeded: false,
-                driver_lost: false,
-            },
-            wake,
-        );
-        let observer = AppObserver {
-            shared: shared.clone(),
-        };
-        let registry = Arc::new(Registry::default());
-        for (label, close) in self.cleanup {
-            registry
-                .register(label, close)
-                .expect("cleanup identity fits in memory");
         }
-        let driver = driver::Driver::new(
-            self.options,
-            self.services,
-            self.dependencies,
-            registry,
-            observer.clone(),
-            runtime.clone(),
-        );
-        runtime.spawn(driver.run());
-        Ok(AppHandle {
-            control: Arc::new(Control { observer }),
+        Ok(Plan {
+            providers,
+            ranks: ranks
+                .into_iter()
+                .map(|rank| rank.expect("every rank is set"))
+                .collect(),
         })
     }
 
-    /// Run until actual termination or the host's stop signal, then await all cleanup.
+    /// Start the application on the current Tokio runtime.
     ///
-    /// This wait has no deadline. Unconfirmed aggregate work, started blocking
-    /// work or pending cleanup can keep it waiting indefinitely. For bounded
-    /// observation, use [`start`](Self::start) and [`AppHandle::shutdown_within`];
-    /// a Pending result leaves responsibility owned by the driver and requires
-    /// the host to retain its runtime or choose an explicit process-exit policy.
-    pub async fn run_until<F, E>(self, stop: F) -> Result<Arc<ExitReport>, RunError>
+    /// The runtime must stay alive until the report arrives. On refusal the
+    /// unstarted `App` comes back in the error.
+    pub fn start(self) -> Result<AppHandle, StartError> {
+        let plan = match self.plan() {
+            Ok(plan) => plan,
+            Err(error) => {
+                return Err(StartError::Invalid {
+                    error,
+                    app: Unstarted::new(self),
+                });
+            }
+        };
+        let Ok(runtime) = Handle::try_current() else {
+            return Err(StartError::NoRuntime {
+                app: Unstarted::new(self),
+            });
+        };
+        if !has_time_driver(&runtime) {
+            return Err(StartError::NoTimeDriver {
+                app: Unstarted::new(self),
+            });
+        }
+        let wake = Arc::new(Notify::new());
+        let mut cells = Vec::with_capacity(self.services.len());
+        let mut entries = Vec::with_capacity(self.services.len());
+        for ((registration, providers), rank) in self
+            .services
+            .into_iter()
+            .zip(plan.providers)
+            .zip(plan.ranks)
+        {
+            let spec = registration.spec;
+            cells.push(Arc::new(ServiceCell {
+                name: spec.name,
+                required: !spec.optional,
+                finite: spec.finite,
+                rank,
+                providers: spec.after,
+                scope: Scope::new(spec.capacity.get(), runtime.clone(), wake.clone()),
+                state: Mutex::default(),
+                detail: Mutex::default(),
+            }));
+            entries.push((registration.entry, providers));
+        }
+        let core = Core::new(cells, wake);
+        let driver = Driver::new(
+            core.clone(),
+            entries,
+            self.startup_timeout,
+            self.shutdown_grace,
+        );
+        runtime.spawn(driver.run());
+        Ok(AppHandle::new(core))
+    }
+
+    /// Run until the application ends by itself. No deadline.
+    pub async fn run(self) -> Result<Arc<Report>, RunError> {
+        self.run_until(std::future::pending::<Result<(), std::convert::Infallible>>())
+            .await
+    }
+
+    /// Run until the application ends or `stop` resolves, then wait for every
+    /// service to drain and every cleanup action to finish. No deadline.
+    ///
+    /// For a bounded wait, use [`App::start`] and put a timeout around
+    /// [`AppHandle::wait`]: an elapsed timeout ends the observation, nothing else.
+    pub async fn run_until<S, E>(self, stop: S) -> Result<Arc<Report>, RunError>
     where
-        F: Future<Output = Result<(), E>> + Send,
+        S: Future<Output = Result<(), E>> + Send,
         E: Into<BoxError> + Send + 'static,
     {
         let handle = self.start()?;
@@ -411,85 +439,131 @@ impl App {
 }
 
 fn classify(
-    result: Result<Arc<ExitReport>, DriverLost>,
+    result: Result<Arc<Report>, Lost>,
     stop_source: Option<BoxError>,
-) -> Result<Arc<ExitReport>, RunError> {
-    match result {
-        Err(source) => Err(RunError::DriverLost {
-            source,
-            stop_source,
-        }),
-        Ok(report) => match stop_source {
-            Some(source) => Err(RunError::StopSource { source, report }),
-            None if !report.is_success() => Err(RunError::Failed { report }),
-            None => Ok(report),
-        },
+) -> Result<Arc<Report>, RunError> {
+    match (result, stop_source) {
+        (Err(lost), stop_source) => Err(RunError::Lost { lost, stop_source }),
+        (Ok(report), Some(source)) => Err(RunError::StopSource { source, report }),
+        (Ok(report), None) if !report.is_success() => Err(RunError::Failed { report }),
+        (Ok(report), None) => Ok(report),
     }
 }
 
-struct Control {
-    observer: AppObserver,
+/// Tokio has no query for its time driver; the only signal is the panic it
+/// raises when a timer is created without one. Where panics abort, that
+/// cannot be caught, so the runtime is taken at its word.
+fn has_time_driver(runtime: &Handle) -> bool {
+    use std::{
+        panic::catch_unwind,
+        pin::pin,
+        task::{Context as TaskContext, Waker},
+    };
+    if cfg!(panic = "abort") {
+        return true;
+    }
+    let _context = runtime.enter();
+    catch_unwind(|| {
+        let mut sleep = pin!(tokio::time::sleep(Duration::ZERO));
+        let _ = sleep
+            .as_mut()
+            .poll(&mut TaskContext::from_waker(Waker::noop()));
+    })
+    .is_ok()
 }
 
-impl Drop for Control {
-    fn drop(&mut self) {
-        self.observer.shared.stop();
+/// An `App` that was refused at start, kept so it can be recovered.
+pub struct Unstarted(Mutex<Option<Box<App>>>);
+
+impl Unstarted {
+    fn new(app: App) -> Self {
+        Self(Mutex::new(Some(Box::new(app))))
     }
 }
 
-/// Cloneable application control; the final control lease drop requests stop.
-#[derive(Clone)]
-pub struct AppHandle {
-    control: Arc<Control>,
-}
-
-impl fmt::Debug for AppHandle {
+impl fmt::Debug for Unstarted {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("AppHandle")
-            .field("snapshot", &self.snapshot())
-            .finish()
+        f.write_str("Unstarted(..)")
     }
 }
 
-impl AppHandle {
-    /// Observe without retaining a control lease.
-    pub fn observer(&self) -> AppObserver {
-        self.control.observer.clone()
-    }
+/// Why an application was not started. Nothing ran; the `App` is in the error.
+#[derive(Debug, thiserror::Error)]
+pub enum StartError {
+    /// The assembly is invalid.
+    #[error("invalid assembly: {error}")]
+    Invalid {
+        /// What is wrong with it.
+        #[source]
+        error: AssemblyError,
+        /// The unstarted application.
+        app: Unstarted,
+    },
+    /// `start` was not called inside a Tokio runtime.
+    #[error("cannot start without a current Tokio runtime")]
+    NoRuntime {
+        /// The unstarted application.
+        app: Unstarted,
+    },
+    /// The runtime was built without `enable_time()`.
+    #[error("the Tokio runtime has no time driver; build it with enable_time()")]
+    NoTimeDriver {
+        /// The unstarted application.
+        app: Unstarted,
+    },
+}
 
-    /// Read current readiness, health, and pending responsibility.
-    pub fn snapshot(&self) -> Arc<AppSnapshot> {
-        self.control.observer.snapshot()
+impl StartError {
+    /// Recover the application that was not started.
+    pub fn into_app(self) -> App {
+        let (Self::Invalid { app, .. } | Self::NoRuntime { app } | Self::NoTimeDriver { app }) =
+            self;
+        *app.0
+            .into_inner()
+            .ok()
+            .flatten()
+            .expect("the application is taken once")
     }
+}
 
-    /// Wait for current readiness within this observation interval.
-    pub async fn ready(&self, within: Duration) -> Result<Arc<AppSnapshot>, ReadyError> {
-        self.control.observer.ready(within).await
-    }
+/// Why `run` or `run_until` did not return a successful report.
+#[derive(Debug, thiserror::Error)]
+pub enum RunError {
+    /// The application was not started.
+    #[error(transparent)]
+    Start(#[from] StartError),
+    /// Everything finished, and something failed. The report says what.
+    #[error("the application finished with failures: {report}")]
+    Failed {
+        /// The final report.
+        report: Arc<Report>,
+    },
+    /// The stop source itself failed. Everything still finished.
+    #[error("the stop source failed: {source}")]
+    StopSource {
+        /// The stop source's error.
+        #[source]
+        source: BoxError,
+        /// The final report.
+        report: Arc<Report>,
+    },
+    /// The driver was lost. There is no report.
+    #[error("the lifecycle driver was lost")]
+    Lost {
+        /// The last observable state.
+        #[source]
+        lost: Lost,
+        /// The stop source's error, if it had already failed.
+        stop_source: Option<BoxError>,
+    },
+}
 
-    /// Request dependency-ordered stop once, immediately withdrawing readiness.
-    pub fn stop(&self) {
-        self.control.observer.shared.stop();
-    }
-
-    /// Wait for actual completion without classifying business failures.
-    pub async fn wait(&self) -> Result<Arc<ExitReport>, DriverLost> {
-        self.control.observer.wait().await
-    }
-
-    /// Request stop and wait for a successful actual-completion report.
-    pub async fn shutdown(&self) -> Result<Arc<ExitReport>, RunError> {
-        self.stop();
-        classify(self.wait().await, None)
-    }
-
-    /// Request stop and observe for a bounded interval; Pending retains responsibility.
-    ///
-    /// This does not bound Tokio runtime destruction: runtime drop can still wait
-    /// for blocking work that has started or is still queued and may start during
-    /// shutdown. The host owns its runtime and process-exit policy.
-    pub async fn shutdown_within(&self, within: Duration) -> Result<ShutdownProgress, DriverLost> {
-        self.stop();
-        self.control.observer.drain(within).await
+impl RunError {
+    /// The final report, when the application did finish.
+    pub fn report(&self) -> Option<&Arc<Report>> {
+        match self {
+            Self::Failed { report } | Self::StopSource { report, .. } => Some(report),
+            Self::Start(_) | Self::Lost { .. } => None,
+        }
     }
 }
