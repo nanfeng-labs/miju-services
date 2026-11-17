@@ -114,6 +114,26 @@ name = "bounded_queue_rounds"
 path = "examples/bounded_queue_rounds.rs"
 required-features = ["miju"]
 
+[[test]]
+name = "protocols"
+path = "tests/protocols.rs"
+
+[[test]]
+name = "protocols_net"
+path = "tests/protocols_net.rs"
+
+[[example]]
+name = "http"
+path = "examples/http.rs"
+
+[[example]]
+name = "websocket"
+path = "examples/websocket.rs"
+
+[[example]]
+name = "udp"
+path = "examples/udp.rs"
+
 [[example]]
 name = "basic"
 path = "examples/basic.rs"

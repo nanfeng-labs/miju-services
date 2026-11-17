@@ -1,9 +1,6 @@
 //! Bind before ready; drop overload and drain accepted datagrams before closing.
 
-use miju_services::{
-    BoxError, Service, ServiceContext,
-    work::{SpawnError, WorkContext, WorkSpec},
-};
+use miju_services::{BoxError, Context, Rejected, Service};
 use std::{
     future::Future,
     net::SocketAddr,
@@ -31,7 +28,7 @@ pub(crate) struct UdpService<F> {
 impl<F> UdpService<F> {
     pub(crate) fn new<Fut>(address: SocketAddr, handle: F) -> Self
     where
-        F: Fn(Vec<u8>, SocketAddr, Arc<UdpSocket>, WorkContext) -> Fut,
+        F: Fn(Vec<u8>, SocketAddr, Arc<UdpSocket>, Context) -> Fut,
         Fut: Future<Output = Result<(), BoxError>>,
     {
         Self {
@@ -45,48 +42,41 @@ impl<F> UdpService<F> {
 
 impl<F, Fut> Service for UdpService<F>
 where
-    F: Fn(Vec<u8>, SocketAddr, Arc<UdpSocket>, WorkContext) -> Fut + Send + Sync + 'static,
+    F: Fn(Vec<u8>, SocketAddr, Arc<UdpSocket>, Context) -> Fut + Send + Sync + 'static,
     Fut: Future<Output = Result<(), BoxError>> + Send + 'static,
 {
     type Error = BoxError;
 
-    async fn run(self, context: ServiceContext) -> Result<(), BoxError> {
+    async fn run(self, ctx: Context) -> Result<(), BoxError> {
         let socket = Arc::new(UdpSocket::bind(self.address).await?);
         if let Some(bound) = self.bound {
             let _ = bound.send(socket.local_addr()?);
         }
-        let handle = Arc::new(self.handle);
-        context.ready();
+        ctx.ready();
         let mut buffer = vec![0; 65535];
         loop {
             let received = tokio::select! {
                 biased;
-                _ = context.stopping() => break,
+                _ = ctx.stopping() => break,
                 received = socket.recv_from(&mut buffer) => received,
             };
             let (length, peer) = received?;
             self.counters.received.fetch_add(1, Ordering::Relaxed);
-            let packet = buffer[..length].to_vec();
-            let handler = handle.clone();
-            let socket = socket.clone();
-            match context
-                .work()
-                .spawn(WorkSpec::new("datagram"), move |work| async move {
-                    handler(packet, peer, socket, work).await
-                }) {
+            let datagram =
+                (self.handle)(buffer[..length].to_vec(), peer, socket.clone(), ctx.clone());
+            match ctx.spawn("datagram", datagram) {
                 Ok(_) => {
                     self.counters.accepted.fetch_add(1, Ordering::Relaxed);
                 }
-                Err(SpawnError::AtCapacity) => {
+                Err(Rejected::Full) => {
                     self.counters
                         .dropped_at_capacity
                         .fetch_add(1, Ordering::Relaxed);
                 }
-                Err(SpawnError::Closed) if context.is_stopping() => break,
-                Err(error) => return Err(error.into()),
+                Err(Rejected::Closed) => break,
             }
         }
-        // Root return closes admission; App retains accepted work until release.
+        // Returning closes admission; the application waits for accepted datagrams.
         Ok(())
     }
 }
