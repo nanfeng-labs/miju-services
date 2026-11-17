@@ -1,8 +1,4 @@
-//! Service assembly, lifecycle management and owned work, with a guarantee of
-//! waiting for resources to actually finish cleaning up.
-//!
-//! This is the v0.3.0 core. The crate README still describes 0.2 and is not
-//! included as documentation until it has been rewritten.
+#![doc = include_str!("../README.md")]
 // Only the JNI boundary (`jni::ffi` and the `export!` macro) uses unsafe code.
 #![deny(unsafe_code)]
 #![cfg_attr(not(feature = "jni"), forbid(unsafe_code))]

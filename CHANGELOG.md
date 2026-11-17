@@ -4,6 +4,102 @@
 
 - ci: append full changelog links to releases ([#25](https://github.com/nanfeng-labs/miju-services/pull/25))
 
+## [0.3.0]
+
+0.3 rebuilds the core on one ownership model: every service has a scope that
+counts its root, its work and its leases, and a single lifecycle driver makes
+every start and stop decision. A report exists only after every scope has
+drained and every cleanup action has finished. The Rust API is not
+source-compatible with 0.2; the JNI Java declarations and codes are unchanged.
+
+### Changed
+
+- Assembly is `App::new()` plus `service`, `service_fn` and `resource` on
+  `&mut App`; there is no builder and no `build()`. Settings are checked at
+  `start()`, which refuses (returning the `App`) on an invalid assembly, without
+  a Tokio runtime, or without its time driver.
+- Work returns a typed value: `ctx.spawn(name, future)` and
+  `ctx.spawn_blocking(name, closure)` give a `Work<T>`. Wrap the name in
+  `critical(..)` for work whose failure fails the service.
+- Readiness and shutdown waits have no built-in deadline; compose them with
+  `tokio::time::timeout`. A small `Status` is pushed on lifecycle transitions,
+  and snapshots are assembled on demand.
+- `periodic::every` and `.on_grid()` replace `fixed_delay` and
+  `fixed_rate_skip`; rounds run inside the service root.
+- The miju adapter builds workers on a `Seat`: `worker(|seat| ..)` and
+  `monitor(|seat| ..)`. Jobs run through a managed executor, so the service
+  drains only after every handler has finished.
+
+### Behaviour changes
+
+- **Backend failure and Monitor restarts no longer block completion.** A
+  worker's backend error fails its service and is named in the report. A
+  Monitor is judged by the final result of `run()`; its restarts are recorded
+  and do not fail the report by themselves.
+- **The stop grace is per service**, measured from that service's own stop
+  request, so every provider gets a full cooperative window. Worst-case
+  cooperative shutdown is dependency depth × grace.
+- **Cleanup order** is reverse dependency rank, then most recent first. A
+  consumer's cleanup still runs before its provider's; the relative order of
+  cleanups that belong to unrelated services can differ from 0.2.
+- **Grace expiry cuts off miju handlers.** When a worker or monitor service's
+  grace expires, its stream is dropped with the handlers running inside it. A
+  durable backend redelivers the task after its orphan timeout; a memory or
+  cron backend loses it. The report marks the service as forced. Set a grace
+  longer than the longest job if a handler must never be cut off.
+- **Per-work stop tokens are gone.** Work observes the service's stop signal
+  (`ctx.stopping()`, `ctx.stop_token()`) and can be aborted with `Work::abort`.
+
+### Added
+
+- `App::resource` and `Resource<T>`: a value acquired after start, read by
+  services that declared `.after(&resource)`; an undeclared read fails every
+  time.
+- `Lease` (`ctx.lease`, `Scope::lease`) for execution the library does not run.
+- `Observer`, `Status` and `AppHandle::changed`; `Snapshot::outstanding` lists
+  what is still held after a timed-out wait.
+- With the `tracing` feature: events for recorded service failures, the start
+  of stopping, grace expiry, failed cleanup actions, termination and loss of the
+  driver.
+
+### Removed
+
+- `App::builder`, `AppBuilder::cleanup` and pre-start rollback; register
+  cleanup with `ctx.defer` where a resource is acquired.
+- `WorkSpec`, `WorkSpec::aggregate`, `fail_service`, `ShutdownProgress`,
+  `shutdown_within`, `ready(within)`, `AppOptions` and `ExitReport` (now
+  `Report`).
+
+### Dependencies
+
+- Require miju 0.3.0 with the `miju` feature (miju-cron 0.3.0 for examples).
+- `futures-util` becomes `futures-core`; `tokio-util` no longer needs `rt`;
+  the `jni` feature no longer enables `tokio/net`. MSRV stays 1.89.
+
+### Migration from 0.2.0-beta.6
+
+| 0.2 | 0.3 |
+| --- | --- |
+| `App::builder().service_fn(n, f).build()?.run_until(s)` | `let mut app = App::new(); app.service_fn(n, f); app.run_until(s)` (an `async fn` item also works with `app.service(n, f)`) |
+| `ServiceSpec::new(n).lifetime(Lifetime::Finite).depends_on(p)` | `Spec::new(n).finite().after(p)` |
+| `.criticality(Criticality::Optional)`, `.max_work(n)` | `.optional()`, `.capacity(NonZeroUsize)` |
+| `.cleanup(label, f)` on the builder + bootstrap rollback | `app.resource(name, \|ctx\| async move { ..; ctx.defer(label, fut)?; Ok(value) })` |
+| `context.defer_cleanup(label, f)` + `CleanupRejected` handling | `ctx.defer(label, fut)?` |
+| `context.work().spawn(WorkSpec::new(l), \|w\| async { .. })` + `oneshot` for the value | `ctx.spawn(l, async { ..; Ok(value) })?.await?` |
+| `WorkSpec::new(l).fail_service()` | `ctx.spawn(critical(l), ..)`, or await the handle and use `?` |
+| `WorkSpec::aggregate(l)` | `ctx.lease(l)?` moved into the external execution |
+| `work.stopping()` | `ctx.stopping()` (clone the context into the work) |
+| `handle.ready(d)` | `tokio::time::timeout(d, handle.ready())` |
+| `handle.shutdown_within(d)` → `ShutdownProgress` | `handle.stop(); tokio::time::timeout(d, handle.wait())` |
+| `report.snapshot.services[i]` | `report.services[i]` or `report.service(name)`; adapter data via `.detail::<T>()` |
+| `worker_from(\|c\| WorkerBuilder::new(c)…stream())` | `worker(\|seat\| WorkerBuilder::new(&seat)…stream())` |
+| `monitor(m)` | `monitor(\|_seat\| m)` |
+| `periodic::fixed_delay(p, f)?` | `periodic::every(p, f)` |
+| `periodic::fixed_rate_skip(p, f)?` | `periodic::every(p, f).on_grid()` |
+| `PeriodicRule`, `FirstTick`, `OnRoundError`, `RoundContext` | `.first_after_period()`, `.stop_on_error()`, `every_with` + `Round` |
+| `AppOptions { startup_timeout, shutdown_grace, .. }` | `app.startup_timeout(d).shutdown_grace(d)` |
+| JNI Java declarations and codes | Unchanged |
+
 ## [0.2.0-beta.6]
 
 - bump: to v0.2.0-beta.6 ([#24](https://github.com/nanfeng-labs/miju-services/pull/24))
