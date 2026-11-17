@@ -1,6 +1,15 @@
-# Report unmaintained dependencies without advisory exemptions.
+# Report unmaintained dependencies. Exemptions are allowed only for crates
+# that reach this package solely through dev-dependencies, each listed with
+# its reason and removal condition; deny.toml carries the same list.
 [advisories]
-ignore = []
+ignore = [
+    # chrono and chrono-tz are unmaintained. Dev-only: reached through
+    # miju-cron 0.3.0 and cron 0.17.0, used by the cron_worker example and its
+    # test; not in the library's dependency tree. Remove once miju-cron drops
+    # them and the cron dev-dependency is replaced.
+    "RUSTSEC-2026-0543",
+    "RUSTSEC-2026-0555",
+]
 informational_warnings = ["unmaintained"]
 
 [output]

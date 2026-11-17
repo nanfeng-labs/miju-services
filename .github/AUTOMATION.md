@@ -56,6 +56,10 @@ release prerequisite. PR runs deliberately have no path filter, so required audi
 checks also run for changelog-only commits.
 `deny.toml` defines allowed licenses and registries; `.cargo/audit.toml` enables
 unmaintained/yanked reporting without inheriting miju's unrelated exceptions.
+Advisory exemptions are allowed only for crates that reach this package solely
+through dev-dependencies. Each is listed in both files with its reason and
+removal condition; currently `chrono` and `chrono-tz`, via `miju-cron` and `cron`
+for the `cron_worker` example.
 
 The vet store imports public audits from Bytecode Alliance, Google, Mozilla and
 Zcash. Version-specific exemptions are explicitly **unaudited bootstrap baselines**,
