@@ -104,6 +104,16 @@ name = "cron_worker"
 path = "examples/cron_worker.rs"
 required-features = ["miju"]
 
+[[test]]
+name = "queue"
+path = "tests/queue.rs"
+required-features = ["miju"]
+
+[[example]]
+name = "bounded_queue_rounds"
+path = "examples/bounded_queue_rounds.rs"
+required-features = ["miju"]
+
 [[example]]
 name = "basic"
 path = "examples/basic.rs"
