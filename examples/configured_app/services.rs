@@ -1,5 +1,5 @@
 use crate::settings::Settings;
-use miju_services::{Service, ServiceContext};
+use miju_services::{Context, Service};
 use std::{io, sync::Arc, time::Instant};
 use tokio::{
     io::{AsyncWrite, AsyncWriteExt, BufWriter},
@@ -36,7 +36,7 @@ impl SampleFile {
 
     pub(crate) async fn close(&self) -> io::Result<()> {
         // Taking the writer closes admission to writes. The cleanup future owns it
-        // until flush completes, including when shutdown observation returns Pending.
+        // until flush completes, including when a bounded wait for the report times out.
         let mut writer = self.writer.lock().await.take().ok_or_else(|| {
             io::Error::new(io::ErrorKind::BrokenPipe, "sample file close already taken")
         })?;
@@ -58,13 +58,13 @@ impl Sampler {
 impl Service for Sampler {
     type Error = io::Error;
 
-    async fn run(self, context: ServiceContext) -> Result<(), Self::Error> {
+    async fn run(self, ctx: Context) -> Result<(), Self::Error> {
         let started = Instant::now();
-        context.ready();
+        ctx.ready();
         loop {
             tokio::select! {
                 biased;
-                _ = context.stopping() => break,
+                _ = ctx.stopping() => break,
 
                 _ = tokio::time::sleep(self.settings.interval()) => {
                     let sample = format!(

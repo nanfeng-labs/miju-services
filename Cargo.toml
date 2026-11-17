@@ -153,3 +153,31 @@ path = "examples/startup_failure.rs"
 [[example]]
 name = "embedded_runtime"
 path = "examples/embedded_runtime.rs"
+
+[[example]]
+name = "configured_app"
+path = "examples/configured_app/main.rs"
+
+[[test]]
+name = "configured_app"
+path = "tests/configured_app.rs"
+
+[[test]]
+name = "configuration"
+path = "tests/configuration.rs"
+
+[[example]]
+name = "watched_settings"
+path = "examples/watched_settings.rs"
+
+[[test]]
+name = "watched_settings"
+path = "tests/watched_settings.rs"
+
+[[example]]
+name = "operational_host"
+path = "examples/operational_host.rs"
+
+[[test]]
+name = "examples"
+path = "tests/examples.rs"

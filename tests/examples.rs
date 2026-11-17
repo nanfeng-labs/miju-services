@@ -1,7 +1,6 @@
 //! Exercise the same assembly functions used by the executable examples.
 
-#[allow(dead_code)]
-#[path = "../examples/basic.rs"]
+#[path = "../examples/support/basic.rs"]
 mod basic;
 #[allow(dead_code)]
 #[path = "../examples/managed_work.rs"]
@@ -11,15 +10,22 @@ mod operational_host;
 #[path = "../examples/support/shared_resource.rs"]
 mod shared_resource;
 
-use miju_services::{App, BoxError, RunError};
+use miju_services::{App, AssemblyError, BoxError, RunError, StartError};
 use operational_host::{HostError, HostOutcome};
 use shared_resource::{CounterStore, Settings};
 use std::{future::pending, io, sync::Arc, time::Duration};
 
+fn heartbeat_app() -> App {
+    let mut app = App::new();
+    app.service("heartbeat", basic::heartbeat);
+    app
+}
+
 #[tokio::test]
 async fn basic_runs_until_host_stop() -> Result<(), BoxError> {
-    let handle = basic::assemble()?.start()?;
-    assert!(handle.ready(Duration::from_secs(1)).await?.ready);
+    let handle = heartbeat_app().start()?;
+    handle.ready().await?;
+    assert!(handle.status().ready);
     assert!(
         tokio::time::timeout(Duration::from_millis(10), handle.wait())
             .await
@@ -31,8 +37,8 @@ async fn basic_runs_until_host_stop() -> Result<(), BoxError> {
 
 #[tokio::test]
 async fn dependency_and_managed_work_use_the_same_assembly() -> Result<(), BoxError> {
-    let handle = managed_work::assemble()?.start()?;
-    handle.ready(Duration::from_secs(1)).await?;
+    let handle = managed_work::assemble().start()?;
+    handle.ready().await?;
     assert!(handle.shutdown().await?.is_success());
     Ok(())
 }
@@ -44,8 +50,8 @@ async fn settings_reach_service_and_cleanup_closes_shared_store() -> Result<(), 
         interval: Duration::from_millis(10),
         increment: 7,
     };
-    let handle = shared_resource::assemble(settings, store.clone())?.start()?;
-    handle.ready(Duration::from_secs(1)).await?;
+    let handle = shared_resource::assemble(settings, store.clone()).start()?;
+    handle.ready().await?;
     tokio::time::advance(settings.interval).await;
     tokio::task::yield_now().await;
     assert_eq!(store.count(), 7);
@@ -56,28 +62,33 @@ async fn settings_reach_service_and_cleanup_closes_shared_store() -> Result<(), 
 }
 
 #[tokio::test]
-async fn bootstrap_leaves_accepted_failure_cleanup_to_the_driver() -> Result<(), BoxError> {
+async fn invalid_settings_are_refused_before_the_store_is_taken_over() {
     let store = Arc::new(CounterStore::default());
     let settings = Settings {
         interval: Duration::ZERO,
         ..Settings::default()
     };
-    let error = shared_resource::run(settings, store.clone(), pending::<io::Result<()>>())
+    let error = shared_resource::assemble(settings, store.clone())
+        .run_until(pending::<io::Result<()>>())
         .await
         .unwrap_err();
-    assert!(error.source.downcast_ref::<RunError>().is_some());
-    assert!(error.rollback.is_none());
-    assert!(store.is_closed());
-    Ok(())
+    assert!(matches!(
+        error,
+        RunError::Start(StartError::Invalid {
+            error: AssemblyError::Service { .. },
+            ..
+        })
+    ));
+    // Nothing ran, so the store is still the caller's to close.
+    assert!(!store.is_closed());
 }
 
 fn failing_app() -> App {
-    App::builder()
-        .service_fn("broken", |_| async {
-            Err(io::Error::other("startup failed").into())
-        })
-        .build()
-        .unwrap()
+    let mut app = App::new();
+    app.service_fn("broken", |_| async {
+        Err::<(), BoxError>(io::Error::other("startup failed").into())
+    });
+    app
 }
 
 #[tokio::test]
@@ -96,9 +107,8 @@ async fn operational_host_observes_failure_before_any_signal() {
 
 #[tokio::test]
 async fn operational_host_retains_first_signal_error_with_report() {
-    let app = basic::assemble().unwrap();
     let error = operational_host::run(
-        app,
+        heartbeat_app(),
         async { Err(io::Error::other("first signal")) },
         pending(),
     )
@@ -113,25 +123,30 @@ async fn operational_host_retains_first_signal_error_with_report() {
     }
 }
 
-fn slow_cleanup_app() -> App {
-    App::builder()
-        .cleanup("flush", || async {
+/// A service whose cleanup takes 20 ms, and which sends its observer out.
+fn slow_cleanup_app(
+    observer: Option<tokio::sync::oneshot::Sender<miju_services::Observer>>,
+) -> App {
+    let mut app = App::new();
+    app.service_fn("service", |ctx| async move {
+        ctx.defer("flush", async {
             tokio::time::sleep(Duration::from_millis(20)).await;
-            Ok(())
-        })
-        .service_fn("service", |context| async move {
-            context.ready();
-            context.stopping().await;
-            Ok(())
-        })
-        .build()
-        .unwrap()
+            Ok::<(), io::Error>(())
+        })?;
+        if let Some(observer) = observer {
+            let _ = observer.send(ctx.app());
+        }
+        ctx.ready();
+        ctx.stopping().await;
+        Ok(())
+    });
+    app
 }
 
 #[tokio::test]
 async fn operational_host_retains_both_signal_errors_and_final_report() {
     let error = operational_host::run(
-        slow_cleanup_app(),
+        slow_cleanup_app(None),
         async { Err(io::Error::other("first signal")) },
         async { Err(io::Error::other("second signal")) },
     )
@@ -154,21 +169,8 @@ async fn operational_host_retains_both_signal_errors_and_final_report() {
 async fn operational_force_exit_is_a_host_decision_without_a_report() {
     let (observer_send, observer_receive) = tokio::sync::oneshot::channel();
     let (stop_send, stop_receive) = tokio::sync::oneshot::channel();
-    let app = App::builder()
-        .cleanup("flush", || async {
-            tokio::time::sleep(Duration::from_millis(20)).await;
-            Ok(())
-        })
-        .service_fn("service", |context| async move {
-            let _ = observer_send.send(context.observer());
-            context.ready();
-            context.stopping().await;
-            Ok(())
-        })
-        .build()
-        .unwrap();
     let host = tokio::spawn(operational_host::run(
-        app,
+        slow_cleanup_app(Some(observer_send)),
         async {
             stop_receive.await.unwrap();
             Ok(())
@@ -176,7 +178,7 @@ async fn operational_force_exit_is_a_host_decision_without_a_report() {
         async { Ok(()) },
     ));
     let observer = observer_receive.await.unwrap();
-    observer.ready(Duration::from_secs(1)).await.unwrap();
+    observer.ready().await.unwrap();
     stop_send.send(()).unwrap();
     let result = host.await.unwrap().unwrap();
     assert!(matches!(result, HostOutcome::ForceExit));
@@ -186,11 +188,12 @@ async fn operational_force_exit_is_a_host_decision_without_a_report() {
         .unwrap()
         .unwrap();
     assert!(report.is_success());
+    assert_eq!(report.cleanup.len(), 1);
 }
 
 #[tokio::test]
 async fn operational_normal_stop_returns_the_actual_report() {
-    let result = operational_host::run(basic::assemble().unwrap(), async { Ok(()) }, pending())
+    let result = operational_host::run(heartbeat_app(), async { Ok(()) }, pending())
         .await
         .unwrap();
     let HostOutcome::Exited(report) = result else {

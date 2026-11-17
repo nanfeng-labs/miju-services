@@ -3,7 +3,7 @@
 #[path = "../examples/support/watched_settings.rs"]
 mod watched_settings;
 
-use miju_services::{App, RunError, observe::ShutdownProgress, report::ServiceOutcome};
+use miju_services::{App, RunError, report::Outcome};
 use std::{
     future::pending,
     io,
@@ -28,17 +28,14 @@ async fn no_change_suppression_belongs_to_writer_and_equal_send_still_notifies()
     let initial = settings("same value");
     let (updates, receiver) = watch::channel(initial.clone());
     let (send, mut rounds) = mpsc::unbounded_channel();
-    let handle = App::builder()
-        .service_fn("reader", move |context| {
-            watched_settings::run(context, receiver, move |snapshot| {
-                send.send(snapshot).unwrap();
-                async { Ok(()) }
-            })
+    let mut app = App::new();
+    app.service_fn("reader", move |ctx| {
+        watched_settings::run(ctx, receiver, move |snapshot| {
+            send.send(snapshot).unwrap();
+            async { Ok(()) }
         })
-        .build()
-        .unwrap()
-        .start()
-        .unwrap();
+    });
+    let handle = app.start().unwrap();
     assert_eq!(rounds.recv().await.unwrap(), initial);
 
     let published = updates.send_if_modified(|current| {
@@ -75,26 +72,23 @@ async fn in_progress_round_keeps_snapshot_and_next_round_reads_latest_update() {
     let release_round = release.clone();
     let counter = Arc::new(AtomicUsize::new(0));
     let (send, mut snapshots) = mpsc::unbounded_channel();
-    let handle = App::builder()
-        .service_fn("reader", move |context| {
-            watched_settings::run(context, receiver, move |snapshot| {
-                let index = counter.fetch_add(1, Ordering::SeqCst);
-                let release = release_round.clone();
-                let send = send.clone();
-                async move {
-                    send.send((index, false, snapshot.clone())).unwrap();
-                    if index == 0 {
-                        release.notified().await;
-                    }
-                    send.send((index, true, snapshot)).unwrap();
-                    Ok(())
+    let mut app = App::new();
+    app.service_fn("reader", move |ctx| {
+        watched_settings::run(ctx, receiver, move |snapshot| {
+            let index = counter.fetch_add(1, Ordering::SeqCst);
+            let release = release_round.clone();
+            let send = send.clone();
+            async move {
+                send.send((index, false, snapshot.clone())).unwrap();
+                if index == 0 {
+                    release.notified().await;
                 }
-            })
+                send.send((index, true, snapshot)).unwrap();
+                Ok(())
+            }
         })
-        .build()
-        .unwrap()
-        .start()
-        .unwrap();
+    });
+    let handle = app.start().unwrap();
     assert_eq!(snapshots.recv().await.unwrap(), (0, false, initial.clone()));
 
     updates.send(settings("intermediate")).unwrap();
@@ -121,19 +115,16 @@ async fn closed_sender_keeps_last_settings_without_busy_loop_or_false_completion
     let initial = settings("last valid");
     let (updates, receiver) = watch::channel(initial.clone());
     let (send, mut rounds) = mpsc::unbounded_channel();
-    let handle = App::builder()
-        .service_fn("reader", move |context| {
-            watched_settings::run(context, receiver, move |snapshot| {
-                send.send(snapshot).unwrap();
-                async { Ok(()) }
-            })
+    let mut app = App::new();
+    app.service_fn("reader", move |ctx| {
+        watched_settings::run(ctx, receiver, move |snapshot| {
+            send.send(snapshot).unwrap();
+            async { Ok(()) }
         })
-        .build()
-        .unwrap()
-        .start()
-        .unwrap();
+    });
+    let handle = app.start().unwrap();
     assert_eq!(rounds.recv().await.unwrap(), initial);
-    handle.ready(Duration::from_secs(1)).await.unwrap();
+    handle.ready().await.unwrap();
 
     drop(updates);
     for _ in 0..3 {
@@ -151,7 +142,7 @@ async fn closed_sender_keeps_last_settings_without_busy_loop_or_false_completion
     );
     tokio::time::advance(Duration::from_millis(1)).await;
     assert_eq!(rounds.recv().await.unwrap(), initial);
-    assert!(handle.snapshot().ready);
+    assert!(handle.status().ready);
     assert!(handle.shutdown().await.unwrap().is_success());
 }
 
@@ -163,31 +154,25 @@ async fn stop_during_round_waits_for_that_round_and_does_not_start_another() {
     let counter = Arc::new(AtomicUsize::new(0));
     let rounds = counter.clone();
     let (send, mut started) = mpsc::unbounded_channel();
-    let handle = App::builder()
-        .service_fn("reader", move |context| {
-            watched_settings::run(context, receiver, move |_| {
-                rounds.fetch_add(1, Ordering::SeqCst);
-                send.send(()).unwrap();
-                let release = release_round.clone();
-                async move {
-                    release.notified().await;
-                    Ok(())
-                }
-            })
+    let mut app = App::new();
+    app.service_fn("reader", move |ctx| {
+        watched_settings::run(ctx, receiver, move |_| {
+            rounds.fetch_add(1, Ordering::SeqCst);
+            send.send(()).unwrap();
+            let release = release_round.clone();
+            async move {
+                release.notified().await;
+                Ok(())
+            }
         })
-        .build()
-        .unwrap()
-        .start()
-        .unwrap();
+    });
+    let handle = app.start().unwrap();
     started.recv().await.unwrap();
+    handle.stop();
     assert!(
-        matches!(
-            handle
-                .shutdown_within(Duration::from_millis(5))
-                .await
-                .unwrap(),
-            ShutdownProgress::Pending(_)
-        ),
+        tokio::time::timeout(Duration::from_millis(5), handle.wait())
+            .await
+            .is_err(),
         "stop cancelled an in-progress configured round"
     );
     assert_eq!(counter.load(Ordering::SeqCst), 1);
@@ -199,14 +184,13 @@ async fn stop_during_round_waits_for_that_round_and_does_not_start_another() {
 #[tokio::test]
 async fn round_error_remains_an_application_service_fault() {
     let (_updates, receiver) = watch::channel(settings("fault"));
-    let error = App::builder()
-        .service_fn("reader", move |context| {
-            watched_settings::run(context, receiver, |_| async {
-                Err(io::Error::other("round failed").into())
-            })
+    let mut app = App::new();
+    app.service_fn("reader", move |ctx| {
+        watched_settings::run(ctx, receiver, |_| async {
+            Err(io::Error::other("round failed").into())
         })
-        .build()
-        .unwrap()
+    });
+    let error = app
         .run_until(pending::<io::Result<()>>())
         .await
         .unwrap_err();
@@ -214,7 +198,7 @@ async fn round_error_remains_an_application_service_fault() {
     let report = error.report().unwrap();
     assert!(!report.is_success());
     assert!(matches!(
-        &report.snapshot.services[0].outcome,
-        Some(ServiceOutcome::Failed(error)) if error.to_string() == "round failed"
+        &report.services[0].outcome,
+        Some(Outcome::Failed(error)) if error.to_string() == "round failed"
     ));
 }

@@ -1,9 +1,9 @@
-use miju_services::{App, ExitReport, RunError};
+use miju_services::{App, Report, RunError};
 use std::{future::Future, io, sync::Arc};
 
 #[derive(Debug)]
 pub(crate) enum HostOutcome {
-    Exited(Arc<ExitReport>),
+    Exited(Arc<Report>),
     ForceExit,
 }
 
@@ -14,7 +14,7 @@ pub(crate) enum HostError {
     #[error("second signal failed: {source}; final result: {result:?}")]
     SecondSignal {
         source: io::Error,
-        result: Result<Arc<ExitReport>, RunError>,
+        result: Result<Arc<Report>, RunError>,
     },
 }
 
