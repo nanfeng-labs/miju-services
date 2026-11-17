@@ -16,6 +16,7 @@ static NEXT: AtomicUsize = AtomicUsize::new(0);
 
 struct Fixture {
     builds: AtomicUsize,
+    created: AtomicUsize,
     drops: AtomicUsize,
     error_drops: AtomicUsize,
     assembly_drops: AtomicUsize,
@@ -35,6 +36,7 @@ fn fixture() -> (String, Arc<Fixture>) {
     let key = NEXT.fetch_add(1, Ordering::SeqCst).to_string();
     let fixture = Arc::new(Fixture {
         builds: AtomicUsize::new(0),
+        created: AtomicUsize::new(0),
         drops: AtomicUsize::new(0),
         error_drops: AtomicUsize::new(0),
         assembly_drops: AtomicUsize::new(0),
@@ -123,6 +125,7 @@ fn factory(args: Vec<String>) -> Result<App, BuildError> {
     let mut app = App::new();
     app.service_fn(spec, move |context| async move {
         let _assembly = assembly;
+        fixture.created.fetch_add(1, Ordering::SeqCst);
         let resource = Resource(fixture.clone());
         let cleanup_fixture = fixture.clone();
         let slow = mode == "slow-cleanup" || mode == "late-fail-slow";
@@ -328,9 +331,16 @@ fn startup_deadline_latches_stop_even_while_factory_is_blocked() {
 #[test]
 fn initialized_unknown_health_does_not_satisfy_start() {
     let (key, fixture) = fixture();
-    let bridge = bridge(Duration::from_millis(30));
+    // Long enough for the root to run and initialize first, even emulated;
+    // too short a budget would expire before that and test nothing.
+    let bridge = bridge(Duration::from_millis(500));
     assert_eq!(bridge.start(vec![key, "unknown".into()]), STARTUP_FAILED);
     until(|| bridge.status() == FAILED);
+    assert_eq!(
+        fixture.created.load(Ordering::SeqCst),
+        1,
+        "the service never initialized within the start budget"
+    );
     assert_eq!(fixture.drops.load(Ordering::SeqCst), 1);
 }
 
