@@ -254,10 +254,27 @@ impl Scope {
         T: Send + 'static,
         E: Into<BoxError> + Send + 'static,
     {
-        let label = name.into();
+        self.spawn_with(name.into(), work, || {})
+    }
+
+    /// The four admission steps, with a seam between spawn and install that
+    /// the abort-handshake test uses to hold the submitter there.
+    fn spawn_with<F, T, E>(
+        &self,
+        label: Label,
+        work: F,
+        between_spawn_and_install: impl FnOnce(),
+    ) -> Result<Work<T>, Rejected>
+    where
+        F: Future<Output = Result<T, E>> + Send + 'static,
+        T: Send + 'static,
+        E: Into<BoxError> + Send + 'static,
+    {
+        // 1 and 2: admit, then name the work before anything can run under it.
         let lease = self.admit(label.clone(), Kind::Task, None)?;
         let key = lease.key;
         let (sender, receiver) = slot::slot();
+        // 3: spawn. On a multi-thread runtime the task may start right away.
         let abort = self
             .0
             .runtime
@@ -272,6 +289,8 @@ impl Scope {
                 polled: false,
             })
             .abort_handle();
+        between_spawn_and_install();
+        // 4: install; aborts at once if the abort pass already ran.
         self.0.registry.install(key, abort.clone());
         Ok(Work { receiver, abort })
     }
@@ -701,5 +720,59 @@ impl<T> Future for Work<T> {
 
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         Pin::new(&mut self.receiver).poll(cx)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::mpsc;
+    use std::time::Duration;
+
+    // I13 at product level: the task is already running when its submitter is
+    // held between spawn and install, and stop and the abort pass happen in
+    // that window. The handshake must still abort it.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_task_running_before_its_handle_is_installed_is_still_aborted() {
+        let scope = Scope::new(8, Handle::current(), Arc::new(Notify::new()));
+        let (reached, at_barrier) = mpsc::channel();
+        let (resume, resumed) = mpsc::channel::<()>();
+        let started = Arc::new(AtomicBool::new(false));
+
+        let submitter = {
+            let (scope, started) = (scope.clone(), started.clone());
+            std::thread::spawn(move || {
+                scope.spawn_with(
+                    Label::from("held"),
+                    async move {
+                        started.store(true, Ordering::SeqCst);
+                        std::future::pending::<Result<(), BoxError>>().await
+                    },
+                    move || {
+                        reached.send(()).unwrap();
+                        let _ = resumed.recv();
+                    },
+                )
+            })
+        };
+        at_barrier.recv().unwrap();
+        while !started.load(Ordering::SeqCst) {
+            tokio::task::yield_now().await;
+        }
+
+        scope.stop();
+        scope.abort();
+        assert!(
+            scope.list(8).iter().any(|item| item.label.name() == "held"),
+            "admitted work is listed before its handle is installed"
+        );
+        resume.send(()).unwrap();
+        let work = submitter.join().unwrap().unwrap();
+
+        let outcome = tokio::time::timeout(Duration::from_secs(5), work)
+            .await
+            .expect("a running task was missed by the abort pass");
+        assert!(matches!(outcome, Err(WorkError::Aborted)));
+        assert!(scope.is_drained());
     }
 }

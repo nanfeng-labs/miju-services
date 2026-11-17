@@ -6,10 +6,10 @@
 //! that moment and the count is released at once; it never waits to be read.
 #![forbid(unsafe_code)]
 
+use crate::sync::{Arc, Mutex};
 use std::{
     future::Future,
     pin::Pin,
-    sync::{Arc, Mutex},
     task::{Context, Poll, Waker},
 };
 

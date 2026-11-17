@@ -1182,3 +1182,246 @@ fn runtime_loss_before_the_driver_runs_releases_captures_without_invoking_them()
         .expect_err("a lost driver must not produce a report");
     assert_eq!(lost.snapshot.status.phase, Phase::Lost);
 }
+
+/// Returns an error at once and panics when it is dropped.
+struct ErrorThenDropPanic(Arc<AtomicBool>);
+
+impl Future for ErrorThenDropPanic {
+    type Output = Result;
+
+    fn poll(
+        self: std::pin::Pin<&mut Self>,
+        _: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Result> {
+        std::task::Poll::Ready(Err(io::Error::other("result before release").into()))
+    }
+}
+
+impl Drop for ErrorThenDropPanic {
+    fn drop(&mut self) {
+        self.0.store(true, SeqCst);
+        if !std::thread::panicking() {
+            panic!("release panic");
+        }
+    }
+}
+
+struct DropPanicsAfterError(Arc<AtomicBool>);
+
+impl Service for DropPanicsAfterError {
+    type Error = BoxError;
+
+    fn run(self, _ctx: Context) -> impl Future<Output = Result> + Send {
+        ErrorThenDropPanic(self.0)
+    }
+}
+
+// A destructor panic is recorded next to the original error; it never replaces it.
+#[tokio::test]
+async fn a_root_and_a_cleanup_keep_their_error_and_their_release_panic_separately() {
+    let root_dropped = Arc::new(AtomicBool::new(false));
+    let close_dropped = Arc::new(AtomicBool::new(false));
+    let mut app = App::new();
+    app.service("fault", DropPanicsAfterError(root_dropped.clone()));
+    {
+        let close_dropped = close_dropped.clone();
+        app.service_fn(Spec::new("store").finite(), move |ctx| async move {
+            ctx.defer("release", ErrorThenDropPanic(close_dropped))?;
+            Ok(())
+        });
+    }
+    let Err(RunError::Failed { report }) = bounded(app.run()).await else {
+        panic!("the root failed; the run cannot succeed");
+    };
+    assert!(root_dropped.load(SeqCst));
+    assert!(close_dropped.load(SeqCst));
+
+    let fault = report.service("fault").unwrap();
+    assert!(
+        matches!(&fault.outcome, Some(Outcome::Failed(error)) if error.to_string() == "result before release")
+    );
+    assert!(
+        matches!(
+            &fault.failures[..],
+            [Failure::Error(_), Failure::ReleasePanic]
+        ),
+        "{:?}",
+        fault.failures
+    );
+
+    let [cleanup] = &report.cleanup[..] else {
+        panic!("one cleanup action");
+    };
+    assert_eq!(
+        cleanup.error.as_ref().unwrap().to_string(),
+        "result before release"
+    );
+    assert_eq!(cleanup.panic.as_deref(), Some("release panic"));
+}
+
+// A stop source that already failed keeps its error when the driver is lost
+// afterwards; the loss is reported, never a completion.
+#[test]
+fn driver_loss_keeps_an_already_observed_stop_source_error() {
+    let (registered, cleanup_registered) = oneshot::channel();
+    let mut app = App::new();
+    app.service_fn("service", move |ctx| async move {
+        ctx.defer("never-finishes", std::future::pending::<Result>())?;
+        let _ = registered.send(());
+        idle(ctx).await
+    });
+    // The stop source fails only once the cleanup is registered, so the driver
+    // is stuck in cleanup when its runtime goes away.
+    let mut running = Box::pin(app.run_until(async move {
+        let _ = cleanup_registered.await;
+        Err::<(), _>(io::Error::other("signal before driver loss"))
+    }));
+    let owner = tokio::runtime::Builder::new_current_thread()
+        .enable_time()
+        .build()
+        .unwrap();
+    owner.block_on(async {
+        assert!(
+            timeout(Duration::from_millis(50), running.as_mut())
+                .await
+                .is_err()
+        );
+    });
+    drop(owner);
+
+    let observer = tokio::runtime::Builder::new_current_thread()
+        .enable_time()
+        .build()
+        .unwrap();
+    let Err(RunError::Lost { lost, stop_source }) = observer.block_on(running) else {
+        panic!("a lost driver was reported as a completion");
+    };
+    assert_eq!(lost.snapshot.status.phase, Phase::Lost);
+    assert_eq!(
+        stop_source.unwrap().to_string(),
+        "signal before driver loss"
+    );
+}
+
+// Tokio's contract, kept as a regression record: runtime destruction can
+// start blocking work that was still queued. It is why a stopped scope checks
+// its stop flag when blocking work starts.
+#[test]
+fn runtime_drop_can_start_blocking_work_that_was_still_queued() {
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_time()
+        .max_blocking_threads(1)
+        .build()
+        .unwrap();
+    let owner = runtime.handle().clone();
+    std::thread::scope(|threads| {
+        let (entered, entry) = mpsc::channel();
+        let (release, gate) = mpsc::channel::<()>();
+        runtime.spawn_blocking(move || {
+            entered.send(()).unwrap();
+            let _ = gate.recv();
+        });
+        entry.recv_timeout(Duration::from_secs(1)).unwrap();
+        let queued = runtime.spawn_blocking(|| 42);
+        let shutdown = threads.spawn(move || drop(runtime));
+        let observer = tokio::runtime::Builder::new_current_thread()
+            .enable_time()
+            .build()
+            .unwrap();
+        observer.block_on(async {
+            timeout(Duration::from_secs(2), async {
+                loop {
+                    if let Err(error) = owner.spawn(async {}).await {
+                        assert!(error.is_cancelled());
+                        break;
+                    }
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .expect("runtime shutdown never began");
+        });
+        assert!(
+            !queued.is_finished(),
+            "the blocking work was not still queued"
+        );
+        drop(release);
+        shutdown.join().unwrap();
+        assert_eq!(observer.block_on(queued).unwrap(), 42);
+    });
+}
+
+// The product side of the record above: blocking work queued when its
+// service stops is never called, even if the pool starts it during runtime
+// shutdown, and its capture is still released.
+#[test]
+fn queued_blocking_work_stopped_before_runtime_shutdown_is_not_called() {
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_time()
+        .max_blocking_threads(1)
+        .build()
+        .unwrap();
+    let (send, receive) = oneshot::channel();
+    let app = {
+        let mut app = App::new();
+        app.service_fn("owner", move |ctx| async move {
+            let _ = send.send(ctx.clone());
+            idle(ctx).await
+        });
+        let _context = runtime.enter();
+        app.start().unwrap()
+    };
+    let ctx = runtime.block_on(receive).unwrap();
+
+    let (entered, entry) = mpsc::channel();
+    let (release, gate) = mpsc::channel::<()>();
+    runtime.spawn_blocking(move || {
+        entered.send(()).unwrap();
+        let _ = gate.recv();
+    });
+    entry.recv_timeout(Duration::from_secs(1)).unwrap();
+
+    let called = Arc::new(AtomicBool::new(false));
+    let drops = Arc::new(AtomicUsize::new(0));
+    let work = {
+        let (called, capture) = (called.clone(), Tracked(drops.clone()));
+        ctx.spawn_blocking("queued", move || {
+            let _capture = capture;
+            called.store(true, SeqCst);
+            Ok::<_, BoxError>(())
+        })
+        .unwrap()
+    };
+    app.stop();
+    runtime.block_on(async {
+        while !ctx.is_stopping() {
+            tokio::task::yield_now().await;
+        }
+    });
+    // Shutdown begins before the occupied blocking thread is released.
+    runtime.shutdown_timeout(Duration::ZERO);
+    drop(release);
+
+    let observer = tokio::runtime::Builder::new_current_thread()
+        .enable_time()
+        .build()
+        .unwrap();
+    let outcome = observer.block_on(async {
+        timeout(Duration::from_secs(2), work)
+            .await
+            .expect("the work never resolved")
+    });
+    assert!(
+        matches!(outcome, Err(miju_services::WorkError::Cancelled)),
+        "{outcome:?}"
+    );
+    assert!(
+        !called.load(SeqCst),
+        "queued work ran after its service stopped"
+    );
+    assert_eq!(drops.load(SeqCst), 1);
+    assert!(
+        observer.block_on(app.wait()).is_err(),
+        "a lost driver must not produce a report"
+    );
+}

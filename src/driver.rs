@@ -16,7 +16,13 @@ use crate::{
     scope::{RootEnd, RootLost},
     service::{Context, RootRecord, ServiceCell},
 };
-use std::{future::Future, pin::Pin, sync::Arc, time::Duration};
+use std::{
+    future::Future,
+    pin::Pin,
+    sync::Arc,
+    task::{Context as TaskContext, Poll},
+    time::Duration,
+};
 use tokio::time::Instant;
 
 pub(crate) type Entry =
@@ -259,8 +265,7 @@ impl Driver {
             let ctx = Context::new(slot.cell.clone(), self.core.clone());
             let record = slot.cell.clone();
             slot.cell.scope.spawn_root(
-                // The entry is invoked inside the task, so its panic is contained.
-                async move { entry(ctx).await },
+                RootFuture::Entry(Some((entry, ctx))),
                 Box::new(move |end: RootEnd| {
                     let outcome = match end.outcome {
                         Ok(Ok(())) => Outcome::Succeeded,
@@ -407,5 +412,29 @@ async fn sleep_until(deadline: Option<Instant>) {
     match deadline {
         Some(deadline) => tokio::time::sleep_until(deadline).await,
         None => std::future::pending().await,
+    }
+}
+
+/// A service root: the entry is invoked on the first poll, inside the task,
+/// so a panic in it is contained. The future it returns is kept, not dropped,
+/// when it completes; the task wrapper drops it afterwards and can then tell
+/// the root's result from a panic in its destructor.
+enum RootFuture {
+    Entry(Option<(Entry, Context)>),
+    Running(Pin<Box<dyn Future<Output = Result<(), BoxError>> + Send>>),
+}
+
+impl Future for RootFuture {
+    type Output = Result<(), BoxError>;
+
+    fn poll(mut self: Pin<&mut Self>, cx: &mut TaskContext<'_>) -> Poll<Self::Output> {
+        if let Self::Entry(pending) = &mut *self {
+            let (entry, ctx) = pending.take().expect("a root is polled after it completed");
+            *self = Self::Running(entry(ctx));
+        }
+        match &mut *self {
+            Self::Running(future) => future.as_mut().poll(cx),
+            Self::Entry(_) => unreachable!("the entry was replaced above"),
+        }
     }
 }

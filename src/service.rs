@@ -216,7 +216,7 @@ impl Context {
             || self.cell.scope.is_drained(),
             || {
                 let close = close.take().expect("called once");
-                Box::pin(async move { close.await.map_err(Into::into) })
+                Box::pin(crate::contain::KeepUntilDropped { inner: close })
             },
         );
         match close {

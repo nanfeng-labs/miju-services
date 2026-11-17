@@ -8,12 +8,10 @@
 //! No user code and no user destructor runs while the lock is held.
 #![forbid(unsafe_code)]
 
-use crate::scope::Label;
-use std::sync::{
-    Arc, Mutex,
-    atomic::{AtomicBool, Ordering},
+use crate::{
+    scope::Label,
+    sync::{AbortHandle, Arc, AtomicBool, Mutex, MutexGuard, Ordering},
 };
-use tokio::task::AbortHandle;
 
 /// What kind of holder an outstanding responsibility is.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -69,7 +67,7 @@ pub(crate) struct Registry {
 }
 
 impl Registry {
-    fn lock(&self) -> std::sync::MutexGuard<'_, Inner> {
+    fn lock(&self) -> MutexGuard<'_, Inner> {
         self.inner.lock().expect("the registry runs no user code")
     }
 
@@ -225,7 +223,15 @@ mod tests {
         registry.install(first, early.abort_handle());
         registry.abort_all();
         registry.install(second, late.abort_handle());
-        assert!(early.await.unwrap_err().is_cancelled());
-        assert!(late.await.unwrap_err().is_cancelled());
+        // Bounded, so a missed abort fails the test instead of hanging it.
+        let within = std::time::Duration::from_secs(5);
+        let early = tokio::time::timeout(within, early)
+            .await
+            .expect("the early handle was not aborted");
+        let late = tokio::time::timeout(within, late)
+            .await
+            .expect("a handle installed after the abort pass was not aborted");
+        assert!(early.unwrap_err().is_cancelled());
+        assert!(late.unwrap_err().is_cancelled());
     }
 }

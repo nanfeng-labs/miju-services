@@ -142,15 +142,17 @@ impl Cleanup {
     }
 }
 
-/// Run one action to completion, turning a panic into a result.
+/// Run one action to completion. Returns the action's error and its panic.
+/// A panic while dropping the action is reported as its panic too, without
+/// replacing an error the action returned; a panic while polling comes first.
 pub(crate) async fn run(action: Action) -> (Option<SharedError>, Option<Arc<str>>) {
-    match (Contained {
+    let (output, release_panic) = Contained {
         action: Some(action),
-    })
-    .await
-    {
-        Ok(Ok(())) => (None, None),
-        Ok(Err(error)) => (Some(Arc::from(error)), None),
+    }
+    .await;
+    match output {
+        Ok(Ok(())) => (None, release_panic),
+        Ok(Err(error)) => (Some(Arc::from(error)), release_panic),
         Err(message) => (None, Some(message)),
     }
 }
@@ -160,7 +162,7 @@ struct Contained {
 }
 
 impl Future for Contained {
-    type Output = Result<Result<(), BoxError>, Arc<str>>;
+    type Output = (Result<Result<(), BoxError>, Arc<str>>, Option<Arc<str>>);
 
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         let Some(action) = self.action.as_mut() else {
@@ -174,9 +176,9 @@ impl Future for Contained {
         };
         // The action's captures are released before its result is published.
         let action = self.action.take();
-        match catch_unwind(AssertUnwindSafe(|| drop(action))) {
-            Ok(()) => Poll::Ready(output),
-            Err(payload) => Poll::Ready(Err(panic_message(payload))),
-        }
+        let release_panic = catch_unwind(AssertUnwindSafe(|| drop(action)))
+            .err()
+            .map(panic_message);
+        Poll::Ready((output, release_panic))
     }
 }

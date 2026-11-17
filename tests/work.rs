@@ -668,3 +668,46 @@ fn runtime_loss_releases_work_and_is_never_a_report() {
     assert_eq!(lost.snapshot.status.phase, Phase::Lost);
     assert_eq!(app.status().phase, Phase::Lost);
 }
+
+/// Re-enters the scope and the observer from its destructor.
+struct Reenter(Context, miju_services::Observer, Arc<AtomicBool>);
+
+impl Drop for Reenter {
+    fn drop(&mut self) {
+        let _ = self.0.spawn("reentry", async { Ok::<_, BoxError>(()) });
+        let _ = self.0.lease("reentry");
+        let _ = self.1.snapshot();
+        self.2.store(true, SeqCst);
+    }
+}
+
+// No library lock is held while a rejected or cancelled future is dropped, so
+// its destructor may call back into the scope and the observer.
+#[tokio::test]
+async fn rejected_and_cancelled_captures_may_reenter_the_scope() {
+    let (app, ctx) = owner(Spec::new("owner").capacity(NonZeroUsize::new(1).unwrap())).await;
+    let held = ctx.lease("held").unwrap();
+    let rejected = Arc::new(AtomicBool::new(false));
+    let capture = Reenter(ctx.clone(), ctx.app(), rejected.clone());
+    let result = ctx.spawn("rejected", async move {
+        let _capture = capture;
+        Ok::<_, BoxError>(())
+    });
+    assert_eq!(result.err(), Some(Rejected::Full));
+    assert!(rejected.load(SeqCst));
+    drop(held);
+
+    let cancelled = Arc::new(AtomicBool::new(false));
+    // The request is recorded; the work is admitted before the driver delivers it.
+    app.stop();
+    let capture = Reenter(ctx.clone(), ctx.app(), cancelled.clone());
+    let work = ctx
+        .spawn("cancelled", async move {
+            let _capture = capture;
+            Ok::<_, BoxError>(())
+        })
+        .unwrap();
+    assert!(matches!(bounded(work).await, Err(WorkError::Cancelled)));
+    assert!(cancelled.load(SeqCst));
+    assert!(bounded(app.wait()).await.unwrap().is_success());
+}

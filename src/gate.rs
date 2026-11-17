@@ -6,7 +6,7 @@
 //! after a drain has been observed.
 #![forbid(unsafe_code)]
 
-use std::sync::atomic::{AtomicU64, Ordering};
+use crate::sync::{AtomicU64, Ordering};
 
 const CLOSED: u64 = 1 << 63;
 

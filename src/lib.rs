@@ -29,6 +29,7 @@ mod driver;
 mod gate;
 mod registry;
 mod slot;
+mod sync;
 
 pub use app::{App, AssemblyError, RunError, Spec, StartError};
 pub use observe::{AppHandle, Lost, NotReady, Observer};

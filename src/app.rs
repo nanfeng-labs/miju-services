@@ -213,7 +213,9 @@ impl App {
         self.services.push(Registration {
             spec: spec.into(),
             entry: Box::new(move |ctx| {
-                Box::pin(async move { service.run(ctx).await.map_err(Into::into) })
+                Box::pin(crate::contain::KeepUntilDropped {
+                    inner: service.run(ctx),
+                })
             }),
             checked,
         });
