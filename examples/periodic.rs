@@ -1,20 +1,19 @@
-//! One operation, one schedule; no queue or job retry policy is needed.
-use miju_services::{App, BoxError, periodic};
+//! One operation, one schedule; no queue and no retry policy.
+
+use miju_services::{App, Result, periodic::every};
 use std::time::Duration;
 
 #[tokio::main(flavor = "current_thread")]
-async fn main() -> Result<(), BoxError> {
-    let report = App::builder()
-        .service(
-            "device-status",
-            periodic::fixed_delay(Duration::from_secs(5), || async {
-                println!("Collect device status");
-                Ok(())
-            })?,
-        )
-        .build()?
-        .run_until(tokio::signal::ctrl_c())
-        .await?;
-    println!("Stopped: success={}", report.is_success());
+async fn main() -> Result {
+    let mut app = App::new();
+    app.service(
+        "device-status",
+        every(Duration::from_secs(5), || async {
+            println!("collect device status");
+            Ok(())
+        }),
+    );
+    let report = app.run_until(tokio::signal::ctrl_c()).await?;
+    println!("{report}");
     Ok(())
 }

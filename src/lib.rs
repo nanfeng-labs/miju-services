@@ -6,9 +6,9 @@
 #![forbid(unsafe_code)]
 #![cfg_attr(docsrs, feature(doc_cfg))]
 
-#[cfg(any(feature = "miju", feature = "periodic", feature = "jni"))]
+#[cfg(any(feature = "miju", feature = "jni"))]
 compile_error!(
-    "the `miju`, `periodic` and `jni` adapters have not been ported to the v0.3.0 core on this branch"
+    "the `miju` and `jni` adapters have not been ported to the v0.3.0 core on this branch"
 );
 
 pub mod app;
@@ -16,6 +16,10 @@ pub mod observe;
 pub mod report;
 pub mod scope;
 pub mod service;
+
+#[cfg(feature = "periodic")]
+#[cfg_attr(docsrs, doc(cfg(feature = "periodic")))]
+pub mod periodic;
 
 mod cleanup;
 mod contain;

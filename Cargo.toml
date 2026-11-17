@@ -12,11 +12,11 @@ description = "Application assembly, service lifecycles, owned work, and resourc
 include = ["src/**/*.rs", "examples/**/*.rs", "examples/jni/Cargo.toml.in", "examples/jni/Cargo.lock", "examples/jni/README.md", "examples/jni/run.py", "examples/jni/java/**/*.java", "examples/configured_app/README.md", "examples/configured_app/settings.toml", "tests/**/*.rs", "Cargo.toml", "Cargo.lock", "README.md", "README.zh-CN.md", "LICENSE", "CHANGELOG.md", "assets/**"]
 
 [features]
-# The adapters return as they are ported to the v0.3.0 core; see src/lib.rs.
-default = []
+# `miju` returns to the defaults when it is ported to the v0.3.0 core; see src/lib.rs.
+default = ["periodic"]
 ## Attach miju Workers and Monitors without replacing their execution policy.
 miju = ["dep:miju", "dep:futures-util"]
-## Run serial periodic operations as service-owned work.
+## Run one operation on a fixed delay or a fixed grid, inside its service's root.
 periodic = []
 ## Host one application generation at a time behind the five-method Java ABI.
 jni = ["dep:jni", "tokio/rt-multi-thread", "tokio/net"]
@@ -74,6 +74,16 @@ path = "tests/work.rs"
 [[test]]
 name = "lifecycle"
 path = "tests/lifecycle.rs"
+
+[[test]]
+name = "periodic"
+path = "tests/periodic.rs"
+required-features = ["periodic"]
+
+[[example]]
+name = "periodic"
+path = "examples/periodic.rs"
+required-features = ["periodic"]
 
 [[example]]
 name = "basic"
