@@ -666,9 +666,9 @@ checksum = "cf8baf1c55e62ffcace7a9f06f4bd9cd3f0c4beb022d3b367256b91b87513d98"
 
 [[package]]
 name = "miju"
-version = "0.2.1"
+version = "0.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6d777a7026315990307b2ce763a806814f4296592ffef60abfd78109b1a87b0a"
+checksum = "7cc0fa82154739eb6804174ab19044decfc1fcc842ba4b00b7e830b3db8f6493"
 dependencies = [
  "miju-core",
  "pin-project",
@@ -678,9 +678,9 @@ dependencies = [
 
 [[package]]
 name = "miju-core"
-version = "0.2.1"
+version = "0.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3461728b9a3d81f25c66f90590885516747ec18ab643803e8e83b48dfdb93bc4"
+checksum = "3311af1d4e4c1f2cc5f360d6f2d46c539d9a4991f6423fd021fd8ff92e30c416"
 dependencies = [
  "futures-channel",
  "futures-core",
@@ -697,9 +697,9 @@ dependencies = [
 
 [[package]]
 name = "miju-cron"
-version = "0.2.0"
+version = "0.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "041be8c44880c509ddd46acbce2234bdc025b6564aaf148eea714a5e5da8d498"
+checksum = "1eb7c9e1d59a08bbab52e98f621969b6a8d488f4001260c4ea2851d05f9992f9"
 dependencies = [
  "chrono",
  "chrono-tz",
@@ -720,6 +720,7 @@ dependencies = [
  "config",
  "cron",
  "document-features",
+ "futures-core",
  "futures-util",
  "http-body",
  "jni",

@@ -6,10 +6,8 @@
 #![forbid(unsafe_code)]
 #![cfg_attr(docsrs, feature(doc_cfg))]
 
-#[cfg(any(feature = "miju", feature = "jni"))]
-compile_error!(
-    "the `miju` and `jni` adapters have not been ported to the v0.3.0 core on this branch"
-);
+#[cfg(feature = "jni")]
+compile_error!("the `jni` host has not been ported to the v0.3.0 core on this branch");
 
 pub mod app;
 pub mod observe;
@@ -20,6 +18,10 @@ pub mod service;
 #[cfg(feature = "periodic")]
 #[cfg_attr(docsrs, doc(cfg(feature = "periodic")))]
 pub mod periodic;
+
+#[cfg(feature = "miju")]
+#[cfg_attr(docsrs, doc(cfg(feature = "miju")))]
+pub mod miju;
 
 mod cleanup;
 mod contain;

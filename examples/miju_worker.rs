@@ -1,29 +1,29 @@
-//! miju constructs and executes the worker; App owns its service lifecycle.
+//! miju builds and executes the worker; the application owns its lifecycle.
+
 use miju::prelude::{MemoryStorage, TaskSink, WorkerBuilder};
-use miju_services::{App, BoxError, miju::worker_from};
+use miju_services::{App, BoxError, Result, miju::worker};
 
 #[tokio::main(flavor = "current_thread")]
-async fn main() -> Result<(), BoxError> {
+async fn main() -> Result {
     let mut jobs = MemoryStorage::new();
     jobs.push("device-01".to_owned()).await?;
-    let report = App::builder()
-        .service(
-            "devices",
-            worker_from(move |context| {
-                WorkerBuilder::new(context)
-                    .backend(jobs)
-                    .build(read_device)
-                    .stream()
-            }),
-        )
-        .build()?
-        .run_until(tokio::signal::ctrl_c())
-        .await?;
-    println!("Stopped: success={}", report.is_success());
+    let mut app = App::new();
+    app.service(
+        "devices",
+        worker(move |seat| {
+            // The seat is the identity the application stops the worker through.
+            WorkerBuilder::new(&seat)
+                .backend(jobs)
+                .build(read_device)
+                .stream()
+        }),
+    );
+    let report = app.run_until(tokio::signal::ctrl_c()).await?;
+    println!("{report}");
     Ok(())
 }
 
-async fn read_device(device: String) -> Result<(), BoxError> {
-    println!("Read status for {device}");
+async fn read_device(device: String) -> std::result::Result<(), BoxError> {
+    println!("read status for {device}");
     Ok(())
 }

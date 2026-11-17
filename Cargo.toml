@@ -12,10 +12,9 @@ description = "Application assembly, service lifecycles, owned work, and resourc
 include = ["src/**/*.rs", "examples/**/*.rs", "examples/jni/Cargo.toml.in", "examples/jni/Cargo.lock", "examples/jni/README.md", "examples/jni/run.py", "examples/jni/java/**/*.java", "examples/configured_app/README.md", "examples/configured_app/settings.toml", "tests/**/*.rs", "Cargo.toml", "Cargo.lock", "README.md", "README.zh-CN.md", "LICENSE", "CHANGELOG.md", "assets/**"]
 
 [features]
-# `miju` returns to the defaults when it is ported to the v0.3.0 core; see src/lib.rs.
-default = ["periodic"]
+default = ["miju", "periodic"]
 ## Attach miju Workers and Monitors without replacing their execution policy.
-miju = ["dep:miju", "dep:futures-util"]
+miju = ["dep:miju", "dep:futures-core"]
 ## Run one operation on a fixed delay or a fixed grid, inside its service's root.
 periodic = []
 ## Host one application generation at a time behind the five-method Java ABI.
@@ -32,8 +31,8 @@ pin-project-lite = "0.2.16"
 thiserror = "2.0.21"
 tracing = { version = "0.1.44", default-features = false, optional = true }
 document-features = { version = "0.2.12", optional = true }
-miju = { version = "0.2.1", default-features = false, optional = true }
-futures-util = { version = "0.3.34", default-features = false, features = ["std"], optional = true }
+miju = { version = "0.3.0", default-features = false, optional = true }
+futures-core = { version = "0.3.31", default-features = false, optional = true }
 
 jni = { version = "0.22.4", default-features = false, optional = true }
 
@@ -42,8 +41,8 @@ axum = { version = "0.8.9", default-features = false, features = ["tokio", "http
 http-body = "1.0.1"
 tokio-tungstenite = "0.30.0"
 futures-util = { version = "0.3.34", default-features = false, features = ["std", "sink"] }
-miju = { version = "0.2.1", default-features = false, features = ["retry"] }
-miju-cron = { version = "0.2.0", default-features = false, features = ["cron"] }
+miju = { version = "0.3.0", default-features = false, features = ["retry", "timeout", "limit"] }
+miju-cron = { version = "0.3.0", default-features = false, features = ["cron"] }
 cron = "0.17.0"
 tower = { version = "0.5.3", default-features = false, features = ["limit", "util"] }
 clap = { version = "4.6.7", default-features = false, features = ["derive", "std", "help", "usage", "error-context"] }
@@ -84,6 +83,26 @@ required-features = ["periodic"]
 name = "periodic"
 path = "examples/periodic.rs"
 required-features = ["periodic"]
+
+[[test]]
+name = "miju"
+path = "tests/miju.rs"
+required-features = ["miju"]
+
+[[example]]
+name = "miju_worker"
+path = "examples/miju_worker.rs"
+required-features = ["miju"]
+
+[[example]]
+name = "miju_monitor"
+path = "examples/miju_monitor.rs"
+required-features = ["miju"]
+
+[[example]]
+name = "cron_worker"
+path = "examples/cron_worker.rs"
+required-features = ["miju"]
 
 [[example]]
 name = "basic"
