@@ -6,6 +6,10 @@
 //! collect faults, start what may start or stop what may stop, enforce grace,
 //! publish status. When every scope has drained it runs the cleanup stack and
 //! publishes the report.
+//!
+//! With the `tracing` feature it also emits lifecycle events: a recorded
+//! failure, the start of stopping, an expired grace period, a failed cleanup
+//! action, termination and loss of the driver. It installs no subscriber.
 #![forbid(unsafe_code)]
 
 use crate::{
@@ -39,6 +43,9 @@ struct Slot {
     root_seen: bool,
     critical_seen: bool,
     settled: bool,
+    /// How many of this service's failures have been emitted as events.
+    #[cfg(feature = "tracing")]
+    failures_emitted: usize,
 }
 
 impl Slot {
@@ -60,6 +67,8 @@ struct Guard(Arc<Core>);
 impl Drop for Guard {
     fn drop(&mut self) {
         if self.0.report.get().is_none() {
+            #[cfg(feature = "tracing")]
+            tracing::error!("lifecycle driver lost before the report; completion is unknown");
             self.0.mark_lost();
         }
     }
@@ -71,6 +80,8 @@ pub(crate) struct Driver {
     startup_timeout: Duration,
     grace: Duration,
     guard: Guard,
+    #[cfg(feature = "tracing")]
+    stop_emitted: bool,
 }
 
 impl Driver {
@@ -101,6 +112,8 @@ impl Driver {
                 root_seen: false,
                 critical_seen: false,
                 settled: false,
+                #[cfg(feature = "tracing")]
+                failures_emitted: 0,
             })
             .collect();
         Self {
@@ -109,6 +122,8 @@ impl Driver {
             slots,
             startup_timeout,
             grace,
+            #[cfg(feature = "tracing")]
+            stop_emitted: false,
         }
     }
 
@@ -117,6 +132,10 @@ impl Driver {
             let now = Instant::now();
             self.collect_faults(now);
             if self.core.stop_requested() {
+                #[cfg(feature = "tracing")]
+                if !std::mem::replace(&mut self.stop_emitted, true) {
+                    tracing::info!("application stopping");
+                }
                 self.stop_pass(now);
             } else {
                 self.start_pass(now);
@@ -146,6 +165,16 @@ impl Driver {
                 error,
                 panic,
             };
+            #[cfg(feature = "tracing")]
+            if !report.is_success() {
+                tracing::warn!(
+                    service = %report.service,
+                    cleanup = %report.name,
+                    error = ?report.error,
+                    panic = ?report.panic,
+                    "cleanup action failed",
+                );
+            }
             reports.push(report.clone());
             self.core.cleanup.finish(report);
         }
@@ -160,6 +189,12 @@ impl Driver {
             cleanup: reports,
             elapsed: self.core.started.elapsed(),
         });
+        #[cfg(feature = "tracing")]
+        tracing::info!(
+            success = report.is_success(),
+            elapsed = ?report.elapsed,
+            "application terminated",
+        );
         let _ = self.core.report.set(report);
         self.core.published.send_modify(|published| {
             published.status.phase = Phase::Terminated;
@@ -220,6 +255,18 @@ impl Driver {
                     .is_some_and(|deadline| now >= deadline)
             {
                 state.failures.push(Failure::StartupTimeout);
+            }
+            #[cfg(feature = "tracing")]
+            {
+                for failure in &state.failures[slot.failures_emitted..] {
+                    tracing::warn!(
+                        service = %slot.cell.name,
+                        required = slot.cell.required,
+                        failure = ?failure,
+                        "service failure recorded",
+                    );
+                }
+                slot.failures_emitted = state.failures.len();
             }
             // A finite service is initialized by succeeding and draining.
             if slot.cell.finite && drained && !slot.settled {
@@ -321,6 +368,12 @@ impl Driver {
                 .is_some_and(|deadline| now >= deadline)
             {
                 slot.abort_sent = true;
+                #[cfg(feature = "tracing")]
+                tracing::warn!(
+                    service = %slot.cell.name,
+                    outstanding = slot.cell.scope.count(),
+                    "stop grace expired; aborting what can be aborted, release still pending",
+                );
                 slot.cell.scope.abort();
             }
         }

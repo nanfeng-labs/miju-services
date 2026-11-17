@@ -19,7 +19,7 @@ miju = ["dep:miju", "dep:futures-core"]
 periodic = []
 ## Host one application generation at a time behind the five-method Java ABI.
 jni = ["dep:jni", "tokio/rt-multi-thread", "tokio/net"]
-## Emit lifecycle warnings without installing a subscriber.
+## Emit lifecycle events (failures, stopping, grace expiry, failed cleanup, termination, driver loss) without installing a subscriber.
 tracing = ["dep:tracing"]
 ## Generate the feature reference in documentation.
 docsrs = ["dep:document-features"]
@@ -49,6 +49,7 @@ clap = { version = "4.6.7", default-features = false, features = ["derive", "std
 config = { version = "0.15.27", default-features = false, features = ["toml"] }
 serde = { version = "1.0.229", features = ["derive"] }
 tokio = { version = "1.54.1", features = ["rt-multi-thread", "test-util", "signal", "fs", "io-util", "net"] }
+tracing = { version = "0.1.44", default-features = false, features = ["std"] }
 
 [lints.rust]
 unsafe_code = "deny"
@@ -181,3 +182,8 @@ path = "examples/operational_host.rs"
 [[test]]
 name = "examples"
 path = "tests/examples.rs"
+
+[[test]]
+name = "tracing"
+path = "tests/tracing.rs"
+required-features = ["tracing"]
