@@ -1,4 +1,4 @@
-use miju_services::{BoxError, ServiceContext};
+use miju_services::{BoxError, Context};
 use std::{future::Future, sync::Arc, time::Duration};
 use tokio::sync::watch;
 
@@ -14,7 +14,7 @@ pub(crate) struct Settings {
 /// snapshot. Watch coalesces intermediate values. Closing the sender keeps the last
 /// valid settings until normal service stop; it does not certify consumer completion.
 pub(crate) async fn run<F, Fut>(
-    context: ServiceContext,
+    ctx: Context,
     mut settings: watch::Receiver<Arc<Settings>>,
     mut round: F,
 ) -> Result<(), BoxError>
@@ -23,8 +23,8 @@ where
     Fut: Future<Output = Result<(), BoxError>> + Send,
 {
     let mut updates_open = true;
-    context.ready();
-    while !context.is_stopping() {
+    ctx.ready();
+    while !ctx.is_stopping() {
         let snapshot = settings.borrow_and_update().clone();
         round(snapshot.clone()).await?;
 
@@ -33,7 +33,7 @@ where
         loop {
             tokio::select! {
                 biased;
-                _ = context.stopping() => return Ok(()),
+                _ = ctx.stopping() => return Ok(()),
 
                 _ = &mut pause => break,
 

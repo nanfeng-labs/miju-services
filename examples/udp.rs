@@ -3,22 +3,22 @@
 #[path = "support/udp.rs"]
 mod udp;
 
-use miju_services::{App, BoxError, service::ServiceSpec};
+use miju_services::{App, Result, Spec};
 use udp::UdpService;
 
 #[tokio::main(flavor = "current_thread")]
-async fn main() -> Result<(), BoxError> {
+async fn main() -> Result {
     let service = UdpService::new(
         "127.0.0.1:4000".parse()?,
-        |packet, peer, socket, _| async move {
+        |packet, peer, socket, _ctx| async move {
             socket.send_to(&packet, peer).await?;
             Ok(())
         },
     );
-    App::builder()
-        .service(ServiceSpec::new("udp").max_work(64.try_into()?), service)
-        .build()?
-        .run_until(tokio::signal::ctrl_c())
-        .await?;
+    let mut app = App::new();
+    // At most 64 datagrams in flight; more are dropped, not queued.
+    app.service(Spec::new("udp").capacity(64.try_into()?), service);
+    let report = app.run_until(tokio::signal::ctrl_c()).await?;
+    println!("{report}");
     Ok(())
 }

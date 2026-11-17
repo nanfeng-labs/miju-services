@@ -1,199 +1,333 @@
-//! Immutable state and completion results. A stop request is never a completion certificate.
+//! Observations and the final report.
+//!
+//! A [`Snapshot`] is assembled when it is asked for and says what is true at
+//! that moment. A [`Report`] exists only after every service has drained and
+//! every cleanup action has finished; it is the one completion certificate.
 #![forbid(unsafe_code)]
 
 use crate::{
     SharedError,
-    cleanup::CleanupReport,
-    service::{Criticality, Lifetime, ServiceId},
-    work::{ScopeSnapshot, WorkReport},
+    scope::{Fault, Kind, Label, WorkCounters},
 };
-use std::{sync::Arc, time::Duration};
+use std::{any::Any, fmt, sync::Arc, time::Duration};
 
-/// Application-reported health, independent of initialization and phase.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+/// What a service says about its own ability to work. Independent of phase.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub enum Health {
-    /// No usable health declaration yet.
+    /// Nothing has been declared yet.
     #[default]
     Unknown,
-    /// Ready for normal operation.
+    /// Working normally.
     Healthy,
-    /// Operational with reduced capability.
+    /// Working with reduced capability.
     Degraded,
-    /// Unable to perform the intended operation.
+    /// Unable to do its job.
     Unhealthy,
 }
 
-/// Current application lifecycle phase.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+/// Where the application is in its lifecycle.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Phase {
-    /// Required initialization has not completed.
+    /// Required services are still initializing.
     Starting,
-    /// All required initialization gates have completed.
+    /// Every required service is initialized.
     Running,
-    /// Stop was requested; dependency-ordered drain is in progress.
+    /// Stop was requested; services drain in dependency order.
     Stopping,
-    /// All service responsibility released; cleanup is in progress.
+    /// Every service has drained; cleanup actions are running.
     Cleaning,
-    /// Final report published after all cleanup actually finished.
+    /// Cleanup has finished and the report exists.
     Terminated,
+    /// The lifecycle driver is gone. Completion is unknown.
+    Lost,
 }
 
-/// Current position of a service root and its work scope.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+/// The application's state in three values, pushed on lifecycle transitions.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct Status {
+    /// Lifecycle phase.
+    pub phase: Phase,
+    /// Running, with every required service initialized and healthy.
+    pub ready: bool,
+    /// Aggregate health.
+    pub health: Health,
+}
+
+/// Where one service is in its lifecycle.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ServicePhase {
-    /// Dependencies have not admitted the entry, or stop froze it before admission.
-    NotStarted,
-    /// The entry is initializing.
+    /// Its providers are not initialized yet.
+    Waiting,
+    /// Its root is running and has not reported ready.
     Starting,
-    /// Initialization completed; the root may still run.
+    /// Initialized.
     Running,
-    /// Local stop is active or the released root still owns work.
+    /// Asked to stop; its root is still running.
+    Stopping,
+    /// Its root has finished; work or leases remain.
     Draining,
-    /// The root and all accepted responsibility have released.
-    Completed,
+    /// Its root, its work and its leases have all released.
+    Done,
 }
 
-/// Root execution result, published only after its captures release.
+/// How a service's root ended.
 #[derive(Clone, Debug)]
-pub enum ServiceOutcome {
-    /// The entry returned Ok.
+pub enum Outcome {
+    /// It returned `Ok`.
     Succeeded,
-    /// The original business error.
+    /// It returned this error.
     Failed(SharedError),
-    /// The entry unwound.
+    /// It panicked.
     Panicked(Arc<str>),
-    /// Stop arrived before the entry was invoked.
-    CancelledBeforeStart,
-    /// A started root was forcibly dropped after grace.
+    /// It was aborted after its grace period.
     Aborted,
+    /// It was never invoked: stop or a provider's failure came first.
+    NotStarted,
 }
 
-/// A lifecycle fault associated with a service.
+/// Something that makes a service's lifecycle unsuccessful.
 #[derive(Clone, Debug)]
-pub enum ServiceFailure {
-    /// Root execution failed.
+pub enum Failure {
+    /// The root returned this error.
     Error(SharedError),
-    /// Root invocation or polling panicked.
+    /// The root panicked.
     Panic(Arc<str>),
-    /// A resident returned before its own stop request.
-    UnexpectedExit,
-    /// A Resident did not report readiness within the configured budget.
+    /// A resident root returned before it was asked to stop.
+    ExitedEarly,
+    /// A resident root did not report ready in time.
     StartupTimeout,
-    /// A FailService work entry failed.
-    Work(Arc<WorkReport>),
-    /// Releasing the root's captures panicked.
-    ReleasePanic(Arc<str>),
-    /// The root needed forced cancellation.
-    Aborted,
+    /// Critical work failed.
+    Work(Fault),
+    /// A destructor panicked while the root was being released.
+    ReleasePanic,
+    /// The root was aborted after its grace period.
+    Forced,
 }
 
-/// One service's latest state, also retained in the final report.
-///
-/// Read fields directly or use `..` when destructuring: enabled adapters may add
-/// observations through Cargo feature unification.
-///
-/// ```
-/// use miju_services::report::ServiceSnapshot;
-///
-/// fn name(snapshot: &ServiceSnapshot) -> &str {
-///     let ServiceSnapshot { id, .. } = snapshot;
-///     id.name()
-/// }
-/// ```
-///
-/// External callers cannot construct a snapshot, including through struct update:
-///
-/// ```compile_fail,E0639
-/// use miju_services::report::ServiceSnapshot;
-///
-/// fn rebuild(snapshot: ServiceSnapshot) -> ServiceSnapshot {
-///     ServiceSnapshot { ..snapshot }
-/// }
-/// ```
+/// One responsibility that has not been released.
+#[derive(Clone, Debug)]
+pub struct Outstanding {
+    /// The service that owns it.
+    pub service: Arc<str>,
+    /// What kind of holder it is.
+    pub kind: Kind,
+    /// Its name.
+    pub name: Label,
+    /// For blocking work, whether the closure has started.
+    pub started: bool,
+    /// Set when the holder stated it cannot prove release.
+    pub unconfirmed: Option<Arc<str>>,
+}
+
+impl fmt::Display for Outstanding {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}: {:?} `{}`", self.service, self.kind, self.name)?;
+        if self.kind == Kind::Blocking {
+            f.write_str(if self.started {
+                " (started)"
+            } else {
+                " (queued)"
+            })?;
+        }
+        if let Some(reason) = &self.unconfirmed {
+            write!(f, " (unconfirmed: {reason})")?;
+        }
+        Ok(())
+    }
+}
+
+/// Typed observations an adapter or a service published.
+#[derive(Clone, Default)]
+pub(crate) struct Detail(pub(crate) Option<Arc<dyn Any + Send + Sync>>);
+
+impl fmt::Debug for Detail {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(if self.0.is_some() {
+            "Detail(..)"
+        } else {
+            "Detail(None)"
+        })
+    }
+}
+
+/// One service, as observed or as it ended.
 #[derive(Clone, Debug)]
 #[non_exhaustive]
 pub struct ServiceSnapshot {
-    /// Periodic invocation counters when this service uses the periodic adapter.
-    #[cfg(feature = "periodic")]
-    pub periodic: Option<crate::periodic::PeriodicSnapshot>,
-    /// Nonfatal miju job errors observed, saturated at u64::MAX.
-    #[cfg(feature = "miju")]
-    pub execution_errors: u64,
-    /// Recent miju job errors with their original source chains.
-    #[cfg(feature = "miju")]
-    pub recent_execution_errors: Vec<SharedError>,
-    /// Registered identity.
-    pub id: ServiceId,
-    /// Failure propagation policy.
-    pub criticality: Criticality,
-    /// Expected root lifetime.
-    pub lifetime: Lifetime,
-    /// Root/scope progress.
+    /// The registered name.
+    pub name: Arc<str>,
+    /// Whether a failure of this service stops the application.
+    pub required: bool,
+    /// Whether the root is expected to finish by itself.
+    pub finite: bool,
+    /// Lifecycle position.
     pub phase: ServicePhase,
-    /// Latched initialization; finite services require successful actual drain.
+    /// Initialization has completed. For a finite service: it succeeded and drained.
     pub initialized: bool,
-    /// Effective health; successful finite services contribute Healthy.
+    /// Declared health.
     pub health: Health,
-    /// Root result, when its captures have released.
-    pub outcome: Option<ServiceOutcome>,
-    /// Lifecycle faults, separate from nonfatal recorded work errors.
-    pub failures: Vec<ServiceFailure>,
-    /// Work still owned by this service and its bounded recent results.
-    pub work: ScopeSnapshot,
-    /// Whether local stop has reached this service.
-    pub stopping: bool,
-    /// Whether this service has ever exceeded its stop confirmation budget.
-    pub stop_budget_exceeded: bool,
+    /// How the root ended, once it has.
+    pub outcome: Option<Outcome>,
+    /// Everything that makes this service's lifecycle unsuccessful.
+    pub failures: Vec<Failure>,
+    /// How its accepted work has ended so far.
+    pub work: WorkCounters,
+    /// The most recent work faults, oldest first.
+    pub recent_faults: Vec<Fault>,
+    /// Whether its grace period expired and an abort was sent.
+    pub forced: bool,
+    /// Some of the responsibilities still held; see `outstanding_total`.
+    pub outstanding: Vec<Outstanding>,
+    /// The authoritative number of responsibilities still held.
+    pub outstanding_total: u64,
+    pub(crate) detail: Detail,
 }
 
-/// A coherent application observation. It does not authorize resource reuse.
+impl ServiceSnapshot {
+    /// An observation published with `Context::publish`, if it has this type.
+    pub fn detail<D: Any + Send + Sync>(&self) -> Option<&D> {
+        self.detail.0.as_deref()?.downcast_ref()
+    }
+}
+
+/// The result of one cleanup action that actually finished.
 #[derive(Clone, Debug)]
-pub struct AppSnapshot {
-    /// Lifecycle phase.
-    pub phase: Phase,
-    /// Current traffic-admission readiness.
-    pub ready: bool,
-    /// Aggregate health, distinct from readiness and phase.
-    pub health: Health,
-    /// Registered services in registration order.
+pub struct CleanupReport {
+    /// The name given to `defer`.
+    pub name: Label,
+    /// The service that registered it.
+    pub service: Arc<str>,
+    /// The error it returned, if any.
+    pub error: Option<SharedError>,
+    /// Its panic, if it panicked.
+    pub panic: Option<Arc<str>>,
+}
+
+impl CleanupReport {
+    /// Whether the action returned `Ok` without panicking.
+    pub fn is_success(&self) -> bool {
+        self.error.is_none() && self.panic.is_none()
+    }
+}
+
+/// What is true now. Per service it is coherent; across services it is not an
+/// atomic cut while the application is running.
+#[derive(Clone, Debug)]
+#[non_exhaustive]
+pub struct Snapshot {
+    /// Phase, readiness and health.
+    pub status: Status,
+    /// Every service, in registration order.
     pub services: Vec<ServiceSnapshot>,
-    /// Cleanup action currently executing, if any.
-    pub current_cleanup: Option<String>,
-    /// Cleanup actions not yet started, in execution order.
-    pub pending_cleanup: Vec<String>,
-    /// Completed cleanup actions.
+    /// Cleanup actions that have finished.
     pub cleanup: Vec<CleanupReport>,
-    /// First-stop confirmation budget was exceeded; this fact never resets.
-    pub budget_exceeded: bool,
-    /// The runtime dropped the independent lifecycle driver before final completion.
-    pub driver_lost: bool,
+    /// The cleanup action running now.
+    pub current_cleanup: Option<(Arc<str>, Label)>,
+    /// Cleanup actions registered and not yet run, in the order they will run.
+    pub pending_cleanup: Vec<(Arc<str>, Label)>,
 }
 
-/// Final actual completion certificate for this application instance.
+impl Snapshot {
+    /// Responsibilities not yet released: service work first, then cleanup.
+    /// Each service lists a bounded number; `outstanding_total` counts all.
+    pub fn outstanding(&self) -> Vec<Outstanding> {
+        let cleanup = self
+            .current_cleanup
+            .iter()
+            .map(|action| (action, true))
+            .chain(self.pending_cleanup.iter().map(|action| (action, false)))
+            .map(|((service, name), started)| Outstanding {
+                service: service.clone(),
+                kind: Kind::Cleanup,
+                name: name.clone(),
+                started,
+                unconfirmed: None,
+            });
+        self.services
+            .iter()
+            .flat_map(|service| service.outstanding.iter().cloned())
+            .chain(cleanup)
+            .collect()
+    }
+
+    /// The authoritative number of responsibilities not yet released.
+    pub fn outstanding_total(&self) -> u64 {
+        let services: u64 = self
+            .services
+            .iter()
+            .map(|service| service.outstanding_total)
+            .sum();
+        services + self.pending_cleanup.len() as u64 + u64::from(self.current_cleanup.is_some())
+    }
+
+    /// Look a service up by name.
+    pub fn service(&self, name: &str) -> Option<&ServiceSnapshot> {
+        self.services.iter().find(|service| &*service.name == name)
+    }
+}
+
+/// Proof that every service drained and every cleanup action finished.
+/// Whether that went well is a separate question: see [`Report::is_success`].
 #[derive(Clone, Debug)]
-pub struct ExitReport {
-    /// Terminal snapshot after all owned work and cleanup release.
-    pub snapshot: Arc<AppSnapshot>,
-    /// Total elapsed application lifetime.
+#[non_exhaustive]
+pub struct Report {
+    /// Every service as it ended, in registration order.
+    pub services: Vec<ServiceSnapshot>,
+    /// Every cleanup action, in the order it ran.
+    pub cleanup: Vec<CleanupReport>,
+    /// From start to the end of cleanup.
     pub elapsed: Duration,
 }
 
-impl ExitReport {
-    /// A final report is emitted only after actual drain, including cleanup.
-    pub fn is_drained(&self) -> bool {
-        true
+impl Report {
+    /// True when every required service ended without a failure, every
+    /// cleanup action succeeded, and nothing had to be aborted.
+    pub fn is_success(&self) -> bool {
+        self.cleanup.iter().all(CleanupReport::is_success)
+            && self.services.iter().all(|service| {
+                !service.forced && (!service.required || service.failures.is_empty())
+            })
     }
 
-    /// Whether required lifecycles and every cleanup succeeded without forced abort.
-    ///
-    /// Ordinary optional faults and recorded work errors remain visible without
-    /// failing the whole lifecycle. Historical budget overrun is not erased.
-    pub fn is_success(&self) -> bool {
-        self.snapshot.cleanup.iter().all(CleanupReport::is_success)
-            && self.snapshot.services.iter().all(|service| {
-                (service.criticality == Criticality::Optional || service.failures.is_empty())
-                    && !matches!(service.outcome, Some(ServiceOutcome::Aborted))
-                    && !service.work.was_aborted
+    /// Every recorded failure with the service it belongs to.
+    pub fn failures(&self) -> Vec<(Arc<str>, Failure)> {
+        self.services
+            .iter()
+            .flat_map(|service| {
+                service
+                    .failures
+                    .iter()
+                    .map(|failure| (service.name.clone(), failure.clone()))
             })
+            .collect()
+    }
+
+    /// Look a service up by name.
+    pub fn service(&self, name: &str) -> Option<&ServiceSnapshot> {
+        self.services.iter().find(|service| &*service.name == name)
+    }
+}
+
+impl fmt::Display for Report {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "{} after {:?}: {} service(s), {} cleanup action(s)",
+            if self.is_success() {
+                "completed"
+            } else {
+                "completed with failures"
+            },
+            self.elapsed,
+            self.services.len(),
+            self.cleanup.len()
+        )?;
+        for (service, failure) in self.failures() {
+            write!(f, "; {service}: {failure:?}")?;
+        }
+        for action in self.cleanup.iter().filter(|action| !action.is_success()) {
+            write!(f, "; cleanup `{}` failed", action.name)?;
+        }
+        Ok(())
     }
 }

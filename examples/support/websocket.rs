@@ -1,4 +1,9 @@
-//! Example-local echo sessions admitted before the HTTP upgrade is accepted.
+//! Example-local echo sessions, admitted before the HTTP upgrade is answered.
+//!
+//! A session is reserved before `101`: a permit from the session limit, a
+//! lease held by the upgrade callback until it hands the socket over or drops
+//! it, and the session itself as managed work. Without a permit the answer is
+//! 503. Sessions use a bounded outbound queue and close within two seconds.
 
 use super::http::HttpService;
 use axum::{
@@ -12,27 +17,50 @@ use axum::{
     routing::get,
 };
 use futures_util::{Sink, SinkExt, Stream, StreamExt};
-use miju_services::{
-    BoxError, Service, ServiceContext,
-    work::{SpawnError, WorkContext, WorkScope, WorkSpec},
-};
-use std::{net::SocketAddr, time::Duration};
+use miju_services::{BoxError, Context, Lease, Rejected, Scope, Service};
+use std::{net::SocketAddr, sync::Arc, time::Duration};
 use tokio::{
-    sync::{mpsc, oneshot},
+    sync::{OwnedSemaphorePermit, Semaphore, mpsc, oneshot},
     time::{Instant, timeout_at},
 };
-use tokio_util::task::{TaskTracker, task_tracker::TaskTrackerToken};
+use tokio_util::sync::CancellationToken;
 
+/// What the upgrade route needs; cloned into each request.
+#[derive(Clone)]
+pub(crate) struct Sessions {
+    scope: Scope,
+    stop: CancellationToken,
+    permits: Arc<Semaphore>,
+}
+
+impl Sessions {
+    pub(crate) fn new(ctx: &Context, max_sessions: usize) -> Self {
+        Self {
+            scope: ctx.scope(),
+            stop: ctx.stop_token(),
+            permits: Arc::new(Semaphore::new(max_sessions)),
+        }
+    }
+}
+
+/// The `/ws` echo route.
+pub(crate) fn router(sessions: Sessions) -> Router {
+    Router::new()
+        .route("/ws", get(upgrade))
+        .with_state(sessions)
+}
+
+/// An HTTP service serving only the echo route.
 pub(crate) struct WebSocketService {
     address: SocketAddr,
-    pub(crate) bound: Option<oneshot::Sender<SocketAddr>>,
+    max_sessions: usize,
 }
 
 impl WebSocketService {
-    pub(crate) fn new(address: SocketAddr) -> Self {
+    pub(crate) fn new(address: SocketAddr, max_sessions: usize) -> Self {
         Self {
             address,
-            bound: None,
+            max_sessions,
         }
     }
 }
@@ -40,23 +68,14 @@ impl WebSocketService {
 impl Service for WebSocketService {
     type Error = BoxError;
 
-    async fn run(self, context: ServiceContext) -> Result<(), BoxError> {
-        let users = TaskTracker::new();
-        let router = Router::new()
-            .route("/ws", get(upgrade))
-            .with_state((context.work().clone(), users.clone()));
-        let mut service = HttpService::new(self.address, router);
-        service.bound = self.bound;
-        service.users = users;
-        service.run(context).await
+    async fn run(self, ctx: Context) -> Result<(), BoxError> {
+        let router = router(Sessions::new(&ctx, self.max_sessions));
+        HttpService::new(self.address, router).run(ctx).await
     }
 }
 
-pub(crate) async fn upgrade(
-    State((scope, users)): State<(WorkScope, TaskTracker)>,
-    upgrade: WebSocketUpgrade,
-) -> Response {
-    match reserve(&scope, &users) {
+async fn upgrade(State(sessions): State<Sessions>, upgrade: WebSocketUpgrade) -> Response {
+    match reserve(&sessions) {
         Ok(handoff) => upgrade
             .on_upgrade(move |socket| {
                 handoff.deliver(socket);
@@ -67,14 +86,15 @@ pub(crate) async fn upgrade(
     }
 }
 
+/// Held by the upgrade callback until it hands the socket over.
 pub(crate) struct Handoff {
     sender: oneshot::Sender<WebSocket>,
-    lease: TaskTrackerToken,
+    lease: Lease,
 }
 
 impl Handoff {
     pub(crate) fn deliver(self, socket: WebSocket) {
-        // A rejected socket drops before releasing the framework callback's lease.
+        // A socket the session no longer wants is dropped before the lease.
         if let Err(socket) = self.sender.send(socket) {
             drop(socket);
         }
@@ -82,23 +102,37 @@ impl Handoff {
     }
 }
 
-pub(crate) fn reserve(scope: &WorkScope, users: &TaskTracker) -> Result<Handoff, SpawnError> {
-    let (send, receive) = oneshot::channel();
-    scope.spawn(WorkSpec::new("websocket-session"), move |work| async move {
-        let socket = tokio::select! {
-            biased;
-            _ = work.stopping() => return Ok::<(), BoxError>(()),
-            socket = receive => match socket {
-                Ok(socket) => socket,
-                Err(_) => return Ok(()),
-            },
-        };
-        session(socket, work).await
-    })?;
-    Ok(Handoff {
-        sender: send,
-        lease: users.token(),
-    })
+/// Reserve a session: a permit, a lease for the callback, and the session work.
+pub(crate) fn reserve(sessions: &Sessions) -> Result<Handoff, Rejected> {
+    let permit = sessions
+        .permits
+        .clone()
+        .try_acquire_owned()
+        .map_err(|_| Rejected::Full)?;
+    let lease = sessions.scope.lease("websocket-upgrade")?;
+    let (sender, receive) = oneshot::channel();
+    let stop = sessions.stop.clone();
+    sessions
+        .scope
+        .spawn("websocket-session", run_session(receive, stop, permit))?;
+    Ok(Handoff { sender, lease })
+}
+
+async fn run_session(
+    socket: oneshot::Receiver<WebSocket>,
+    stop: CancellationToken,
+    _permit: OwnedSemaphorePermit,
+) -> Result<(), BoxError> {
+    let socket = tokio::select! {
+        biased;
+        _ = stop.cancelled() => return Ok(()),
+        socket = socket => match socket {
+            Ok(socket) => socket,
+            // The upgrade failed; nothing was handed over.
+            Err(_) => return Ok(()),
+        },
+    };
+    session(socket, stop).await
 }
 
 /// One deadline covers Close send, flush and acknowledgement, followed by drop.
@@ -134,7 +168,8 @@ where
     }
 }
 
-pub(crate) async fn session<S, E>(socket: S, work: WorkContext) -> Result<(), BoxError>
+/// Echo until the peer closes, the service stops, or the outbound queue overflows.
+pub(crate) async fn session<S, E>(socket: S, stop: CancellationToken) -> Result<(), BoxError>
 where
     S: Stream<Item = Result<Message, E>> + Sink<Message, Error = E> + Unpin,
     E: std::error::Error + Send + Sync + 'static,
@@ -167,7 +202,7 @@ where
         // Cancel borrowing IO futures, retaining both halves for the Close phase.
         tokio::select! {
             biased;
-            _ = work.stopping() => Ok(true),
+            _ = stop.cancelled() => Ok(true),
             result = read => result,
             result = write => result,
         }

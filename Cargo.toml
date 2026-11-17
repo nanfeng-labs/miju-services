@@ -1,9 +1,12 @@
 [package]
 name = "miju-services"
-version = "0.2.0-beta.6"
+version = "0.3.0"
 edition = "2024"
 rust-version = "1.89"
 license = "MIT"
+# Unported tests and examples stay on disk and are listed again as they are ported.
+autotests = false
+autoexamples = false
 repository = "https://github.com/nanfeng-labs/miju-services"
 description = "Application assembly, service lifecycles, owned work, and resource cleanup for miju"
 include = ["src/**/*.rs", "examples/**/*.rs", "examples/jni/Cargo.toml.in", "examples/jni/Cargo.lock", "examples/jni/README.md", "examples/jni/run.py", "examples/jni/java/**/*.java", "examples/configured_app/README.md", "examples/configured_app/settings.toml", "tests/**/*.rs", "Cargo.toml", "Cargo.lock", "README.md", "README.zh-CN.md", "LICENSE", "CHANGELOG.md", "assets/**"]
@@ -11,24 +14,25 @@ include = ["src/**/*.rs", "examples/**/*.rs", "examples/jni/Cargo.toml.in", "exa
 [features]
 default = ["miju", "periodic"]
 ## Attach miju Workers and Monitors without replacing their execution policy.
-miju = ["dep:miju", "dep:futures-util"]
-## Run serial periodic operations as service-owned work.
+miju = ["dep:miju", "dep:futures-core"]
+## Run one operation on a fixed delay or a fixed grid, inside its service's root.
 periodic = []
 ## Host one application generation at a time behind the five-method Java ABI.
-jni = ["dep:jni", "tokio/rt-multi-thread", "tokio/net"]
-## Emit lifecycle warnings without installing a subscriber.
+jni = ["dep:jni", "tokio/rt-multi-thread"]
+## Emit lifecycle events (failures, stopping, grace expiry, failed cleanup, termination, driver loss) without installing a subscriber.
 tracing = ["dep:tracing"]
 ## Generate the feature reference in documentation.
 docsrs = ["dep:document-features"]
 
 [dependencies]
 tokio = { version = "1.54.1", features = ["rt", "sync", "time", "macros"] }
-tokio-util = { version = "0.7.20", features = ["rt"] }
+tokio-util = "0.7.20"
+pin-project-lite = "0.2.16"
 thiserror = "2.0.21"
 tracing = { version = "0.1.44", default-features = false, optional = true }
 document-features = { version = "0.2.12", optional = true }
-miju = { version = "0.2.1", default-features = false, optional = true }
-futures-util = { version = "0.3.34", default-features = false, features = ["std"], optional = true }
+miju = { version = "0.3.0", default-features = false, optional = true }
+futures-core = { version = "0.3.31", default-features = false, optional = true }
 
 jni = { version = "0.22.4", default-features = false, optional = true }
 
@@ -37,14 +41,15 @@ axum = { version = "0.8.9", default-features = false, features = ["tokio", "http
 http-body = "1.0.1"
 tokio-tungstenite = "0.30.0"
 futures-util = { version = "0.3.34", default-features = false, features = ["std", "sink"] }
-miju = { version = "0.2.1", default-features = false, features = ["retry"] }
-miju-cron = { version = "0.2.0", default-features = false, features = ["cron"] }
+miju = { version = "0.3.0", default-features = false, features = ["retry", "timeout", "limit"] }
+miju-cron = { version = "0.3.0", default-features = false, features = ["cron"] }
 cron = "0.17.0"
 tower = { version = "0.5.3", default-features = false, features = ["limit", "util"] }
 clap = { version = "4.6.7", default-features = false, features = ["derive", "std", "help", "usage", "error-context"] }
 config = { version = "0.15.27", default-features = false, features = ["toml"] }
 serde = { version = "1.0.229", features = ["derive"] }
 tokio = { version = "1.54.1", features = ["rt-multi-thread", "test-util", "signal", "fs", "io-util", "net"] }
+tracing = { version = "0.1.44", default-features = false, features = ["std"] }
 
 [lints.rust]
 unsafe_code = "deny"
@@ -62,22 +67,123 @@ rustdoc-args = ["--cfg", "docsrs"]
 [package.metadata.cargo-udeps.ignore]
 normal = ["document-features"]
 
+[[test]]
+name = "work"
+path = "tests/work.rs"
+
+[[test]]
+name = "lifecycle"
+path = "tests/lifecycle.rs"
+
+[[test]]
+name = "periodic"
+path = "tests/periodic.rs"
+required-features = ["periodic"]
+
+[[example]]
+name = "periodic"
+path = "examples/periodic.rs"
+required-features = ["periodic"]
+
+[[test]]
+name = "miju"
+path = "tests/miju.rs"
+required-features = ["miju"]
+
 [[example]]
 name = "miju_worker"
+path = "examples/miju_worker.rs"
 required-features = ["miju"]
 
 [[example]]
 name = "miju_monitor"
+path = "examples/miju_monitor.rs"
 required-features = ["miju"]
 
 [[example]]
-name = "periodic"
-required-features = ["periodic"]
-
-[[example]]
 name = "cron_worker"
+path = "examples/cron_worker.rs"
+required-features = ["miju"]
+
+[[test]]
+name = "queue"
+path = "tests/queue.rs"
 required-features = ["miju"]
 
 [[example]]
 name = "bounded_queue_rounds"
+path = "examples/bounded_queue_rounds.rs"
 required-features = ["miju"]
+
+[[test]]
+name = "protocols"
+path = "tests/protocols.rs"
+
+[[test]]
+name = "protocols_net"
+path = "tests/protocols_net.rs"
+
+[[example]]
+name = "http"
+path = "examples/http.rs"
+
+[[example]]
+name = "websocket"
+path = "examples/websocket.rs"
+
+[[example]]
+name = "udp"
+path = "examples/udp.rs"
+
+[[example]]
+name = "basic"
+path = "examples/basic.rs"
+
+[[example]]
+name = "managed_work"
+path = "examples/managed_work.rs"
+
+[[example]]
+name = "shared_resource"
+path = "examples/shared_resource.rs"
+
+[[example]]
+name = "startup_failure"
+path = "examples/startup_failure.rs"
+
+[[example]]
+name = "embedded_runtime"
+path = "examples/embedded_runtime.rs"
+
+[[example]]
+name = "configured_app"
+path = "examples/configured_app/main.rs"
+
+[[test]]
+name = "configured_app"
+path = "tests/configured_app.rs"
+
+[[test]]
+name = "configuration"
+path = "tests/configuration.rs"
+
+[[example]]
+name = "watched_settings"
+path = "examples/watched_settings.rs"
+
+[[test]]
+name = "watched_settings"
+path = "tests/watched_settings.rs"
+
+[[example]]
+name = "operational_host"
+path = "examples/operational_host.rs"
+
+[[test]]
+name = "examples"
+path = "tests/examples.rs"
+
+[[test]]
+name = "tracing"
+path = "tests/tracing.rs"
+required-features = ["tracing"]

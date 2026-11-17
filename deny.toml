@@ -1,5 +1,10 @@
 [advisories]
 yanked = "deny"
+# Same exemptions as .cargo/audit.toml: dev-only crates, each with a removal condition.
+ignore = [
+    { id = "RUSTSEC-2026-0543", reason = "chrono is unmaintained; dev-only via miju-cron 0.3.0 and cron 0.17.0 (cron_worker example); remove once miju-cron drops it and cron is replaced" },
+    { id = "RUSTSEC-2026-0555", reason = "chrono-tz is unmaintained; dev-only via miju-cron 0.3.0 (cron_worker example); remove once miju-cron drops it" },
+]
 
 [licenses]
 allow = ["Apache-2.0", "MIT", "Unicode-3.0"]

@@ -1,23 +1,28 @@
-//! Use a Monitor when its grouped restart and delayed failure semantics are intended.
-//! Restart history leaves cleanup unconfirmed; use separate worker services when
-//! each worker's failure must stop and drain independently.
-use miju::prelude::{MemoryStorage, Monitor, WorkerBuilder};
-use miju_services::{App, BoxError, miju::monitor};
+//! A Monitor keeps its grouped restart policy. Jobs run on the seat's executor
+//! stay owned by the service across restarts, so stop waits for them.
+
+use miju::prelude::{MemoryStorage, Monitor, ParallelizeExt, WorkerBuilder};
+use miju_services::{App, Result, miju::monitor};
 
 #[tokio::main(flavor = "current_thread")]
-async fn main() -> Result<(), BoxError> {
-    let workers = Monitor::new().register(|_| {
-        WorkerBuilder::new("devices")
-            .backend(MemoryStorage::new())
-            .build(|device: String| async move {
-                println!("Read status for {device}");
-            })
-    });
-    let report = App::builder()
-        .service("workers", monitor(workers))
-        .build()?
-        .run_until(tokio::signal::ctrl_c())
-        .await?;
-    println!("Stopped: success={}", report.is_success());
+async fn main() -> Result {
+    let mut app = App::new();
+    app.service(
+        "fleet",
+        monitor(|seat| {
+            Monitor::new()
+                .should_restart(|worker, _error| worker.restarts() < 3)
+                .register(move |_restarts| {
+                    WorkerBuilder::new("fleet-worker")
+                        .backend(MemoryStorage::new())
+                        .parallelize(seat.executor())
+                        .build(|device: String| async move {
+                            println!("read status for {device}");
+                        })
+                })
+        }),
+    );
+    let report = app.run_until(tokio::signal::ctrl_c()).await?;
+    println!("{report}");
     Ok(())
 }

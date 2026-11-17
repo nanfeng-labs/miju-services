@@ -1,26 +1,26 @@
-//! Calendar scheduling is a miju-cron backend, without a producer and queue.
+//! Calendar scheduling is a miju-cron backend: no producer and no queue.
+
 use miju::prelude::WorkerBuilder;
 use miju_cron::{CronScheduler, Tick};
-use miju_services::{App, BoxError, miju::worker_from};
+use miju_services::{App, Result, miju::worker};
 
 #[tokio::main(flavor = "current_thread")]
-async fn main() -> Result<(), BoxError> {
+async fn main() -> Result {
     let schedule: cron::Schedule = "0 */5 * * * *".parse()?;
-    let report = App::builder()
-        .service(
-            "device-calendar",
-            worker_from(move |context| {
-                WorkerBuilder::new(context)
-                    .backend(CronScheduler::new(schedule))
-                    .build(|tick: Tick| async move {
-                        println!("Collect at {}", tick.get_timestamp());
-                    })
-                    .stream()
-            }),
-        )
-        .build()?
-        .run_until(tokio::signal::ctrl_c())
-        .await?;
-    println!("Stopped: success={}", report.is_success());
+    let mut app = App::new();
+    app.service(
+        "device-calendar",
+        worker(move |seat| {
+            WorkerBuilder::new(&seat)
+                // Named after the service, so each tick has a stable task ID.
+                .backend(CronScheduler::new(schedule).with_name(seat.name()))
+                .build(|tick: Tick| async move {
+                    println!("collect at {}", tick.get_timestamp());
+                })
+                .stream()
+        }),
+    );
+    let report = app.run_until(tokio::signal::ctrl_c()).await?;
+    println!("{report}");
     Ok(())
 }

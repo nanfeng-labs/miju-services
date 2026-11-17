@@ -18,7 +18,8 @@ repository settings or prove that GitHub-hosted jobs have run.
 - The `jvm` CI job defines Linux/macOS, JDK 17/21 and stable/MSRV real UDP
   consumer runs with `-Xcheck:jni`. Windows desktop JNI has separate
   [workstation acceptance evidence](https://github.com/nanfeng-labs/miju-services/releases/download/v0.2.0-beta.5/BETA5-WINDOWS-ACCEPTANCE.md)
-  bound to main commit `af51bc0`; it is not a Windows JVM CI job. Android ART
+  bound to main commit `af51bc0`; it covers that source only, must be re-run for
+  0.3, and is not a Windows JVM CI job. Android ART
   remains unvalidated. Platform acceptance remains tied to actual run evidence.
 - `pr-checks.yaml` prepares same-repository PRs, then validates the live title and
   changelog. Titles contain the PR's own `#N`. Dependabot titles and changelog
@@ -55,6 +56,10 @@ release prerequisite. PR runs deliberately have no path filter, so required audi
 checks also run for changelog-only commits.
 `deny.toml` defines allowed licenses and registries; `.cargo/audit.toml` enables
 unmaintained/yanked reporting without inheriting miju's unrelated exceptions.
+Advisory exemptions are allowed only for crates that reach this package solely
+through dev-dependencies. Each is listed in both files with its reason and
+removal condition; currently `chrono` and `chrono-tz`, via `miju-cron` and `cron`
+for the `cron_worker` example.
 
 The vet store imports public audits from Bytecode Alliance, Google, Mozilla and
 Zcash. Version-specific exemptions are explicitly **unaudited bootstrap baselines**,
@@ -64,10 +69,13 @@ JVM tests. Dependency updates must resolve new vet findings
 and document any exemption; never turn a failing check into an invented audit.
 
 `supply-chain/audits.toml` also records attributed AI-assisted delta reviews of
-miju and miju-core 0.2.0 to 0.2.1. These cover only the reviewed deltas, retain the
-unaudited 0.2.0 baseline exemptions, and do not represent an independent human
-security certification. Their `safe-to-deploy` criterion is cargo-vet's review
-classification; it does not certify the entire dependency graph.
+miju and miju-core 0.2.0 to 0.2.1. They cover only those deltas, do not represent
+an independent human security certification, and no longer apply to a locked
+version: miju, miju-core and miju-cron 0.3.0 are covered by version-specific
+unaudited exemptions whose notes record a mechanical scan of each delta. Delta
+audits from the previous vetted versions are still owed. A `safe-to-deploy`
+criterion is cargo-vet's review classification; it does not certify the entire
+dependency graph.
 
 ## Releases
 

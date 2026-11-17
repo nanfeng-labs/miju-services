@@ -1,130 +1,184 @@
-//! Named cleanup in one application-wide reverse registration order.
+//! Deferred cleanup actions.
 //!
-//! Registration transfers responsibility at successful start or during service
-//! initialization. An unstarted [`App`](crate::App) cannot run asynchronous cleanup
-//! from Drop; bootstrap must retain independent rollback access until start succeeds.
+//! Actions are registered by the code that acquired a resource and run by the
+//! driver after every scope has drained: consumers' actions before their
+//! providers', and within one rank the most recently registered first. Each
+//! runs once, to completion, and a failure does not skip the rest.
 #![forbid(unsafe_code)]
 
-use crate::{BoxError, SharedError};
+use crate::{BoxError, SharedError, contain::panic_message, report::CleanupReport, scope::Label};
 use std::{
-    fmt,
     future::Future,
+    panic::{AssertUnwindSafe, catch_unwind},
     pin::Pin,
     sync::{Arc, Mutex},
+    task::{Context, Poll},
 };
 
-/// Identity allocated in cleanup registration order.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct CleanupId(pub(crate) u64);
+pub(crate) type Action = Pin<Box<dyn Future<Output = Result<(), BoxError>> + Send>>;
 
-impl CleanupId {
-    /// Application-local registration number.
-    pub fn get(self) -> u64 {
-        self.0
-    }
-}
-
-/// A rejected transfer that still owns the caller's cleanup closure.
-pub struct CleanupRejected<F> {
-    label: String,
-    close: F,
-}
-
-impl<F> CleanupRejected<F> {
-    pub(crate) fn new(label: String, close: F) -> Self {
-        Self { label, close }
-    }
-
-    /// Label of the resource whose responsibility was not accepted.
-    pub fn label(&self) -> &str {
-        &self.label
-    }
-
-    /// Recover the original closure for application-owned cleanup.
-    pub fn into_inner(self) -> F {
-        self.close
-    }
-}
-
-impl<F> fmt::Debug for CleanupRejected<F> {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("CleanupRejected")
-            .field("label", &self.label)
-            .finish_non_exhaustive()
-    }
-}
-
-impl<F> fmt::Display for CleanupRejected<F> {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "cleanup registration closed for {}", self.label)
-    }
-}
-
-/// Result of one actually completed cleanup action.
-#[derive(Clone, Debug)]
-pub struct CleanupReport {
-    /// Registration identity.
-    pub id: CleanupId,
-    /// Application-supplied resource name.
-    pub label: String,
-    /// Original close error, if any.
-    pub error: Option<SharedError>,
-    /// Panic during invocation or polling, if any.
-    pub panic: Option<Arc<str>>,
-    /// Panic when releasing the close future, independently of its result.
-    pub release_panic: Option<Arc<str>>,
-}
-
-impl CleanupReport {
-    /// Whether close and release both succeeded.
-    pub fn is_success(&self) -> bool {
-        self.error.is_none() && self.panic.is_none() && self.release_panic.is_none()
-    }
-}
-
-pub(crate) type Close =
-    Box<dyn FnOnce() -> Pin<Box<dyn Future<Output = Result<(), BoxError>> + Send>> + Send>;
-
-pub(crate) struct Action {
-    pub(crate) id: CleanupId,
-    pub(crate) label: String,
-    pub(crate) close: Close,
+pub(crate) struct Deferred {
+    rank: usize,
+    sequence: u64,
+    pub(crate) label: Label,
+    pub(crate) service: Arc<str>,
+    pub(crate) action: Action,
 }
 
 #[derive(Default)]
-pub(crate) struct Registry {
-    actions: Mutex<Vec<Action>>,
+struct Stack {
+    actions: Vec<Deferred>,
+    next: u64,
+    /// Set when the driver takes the actions; nothing is accepted afterwards.
+    closed: bool,
 }
 
-impl Registry {
-    pub(crate) fn register<F, Fut, E>(
+#[derive(Default)]
+struct Progress {
+    current: Option<(Arc<str>, Label)>,
+    pending: Vec<(Arc<str>, Label)>,
+    done: Vec<CleanupReport>,
+}
+
+#[derive(Default)]
+pub(crate) struct Cleanup {
+    stack: Mutex<Stack>,
+    progress: Mutex<Progress>,
+}
+
+impl Cleanup {
+    /// Register an action unless registration has closed or `rejected` says so.
+    /// `make` runs only on acceptance, so a rejected caller keeps its future.
+    pub(crate) fn push(
         &self,
-        label: String,
-        close: F,
-    ) -> Result<CleanupId, CleanupRejected<F>>
-    where
-        F: FnOnce() -> Fut + Send + 'static,
-        Fut: Future<Output = Result<(), E>> + Send + 'static,
-        E: Into<BoxError> + Send + 'static,
-    {
-        let mut actions = self.actions.lock().unwrap();
-        let Some(id) = u64::try_from(actions.len())
-            .ok()
-            .and_then(|n| n.checked_add(1))
-        else {
-            drop(actions);
-            return Err(CleanupRejected::new(label, close));
-        };
-        let id = CleanupId(id);
-        actions.push(Action {
-            id,
+        rank: usize,
+        label: Label,
+        service: Arc<str>,
+        rejected: impl FnOnce() -> bool,
+        make: impl FnOnce() -> Action,
+    ) -> bool {
+        let mut stack = self.stack.lock().expect("the stack runs no user code");
+        if stack.closed || rejected() {
+            return false;
+        }
+        let sequence = stack.next;
+        stack.next += 1;
+        stack.actions.push(Deferred {
+            rank,
+            sequence,
             label,
-            close: Box::new(move || crate::task::boxed(close())),
+            service,
+            action: make(),
         });
-        Ok(id)
+        true
     }
 
-    pub(crate) fn take(&self) -> Vec<Action> {
-        std::mem::take(&mut *self.actions.lock().unwrap())
+    /// Close registration and return the actions in the order they must run.
+    pub(crate) fn take_ordered(&self) -> Vec<Deferred> {
+        let mut actions = {
+            let mut stack = self.stack.lock().expect("the stack runs no user code");
+            stack.closed = true;
+            std::mem::take(&mut stack.actions)
+        };
+        // Consumers before providers, then last registered first.
+        actions.sort_by_key(|action| std::cmp::Reverse((action.rank, action.sequence)));
+        let mut progress = self.progress.lock().expect("progress runs no user code");
+        progress.pending = actions
+            .iter()
+            .map(|action| (action.service.clone(), action.label.clone()))
+            .collect();
+        actions
+    }
+
+    pub(crate) fn begin(&self) {
+        let mut progress = self.progress.lock().expect("progress runs no user code");
+        if !progress.pending.is_empty() {
+            progress.current = Some(progress.pending.remove(0));
+        }
+    }
+
+    pub(crate) fn finish(&self, report: CleanupReport) {
+        let mut progress = self.progress.lock().expect("progress runs no user code");
+        progress.current = None;
+        progress.done.push(report);
+    }
+
+    /// Finished, running and waiting actions, for a snapshot.
+    #[allow(clippy::type_complexity)]
+    pub(crate) fn observe(
+        &self,
+    ) -> (
+        Vec<CleanupReport>,
+        Option<(Arc<str>, Label)>,
+        Vec<(Arc<str>, Label)>,
+    ) {
+        let registered: Vec<_> = {
+            let stack = self.stack.lock().expect("the stack runs no user code");
+            let mut actions: Vec<_> = stack
+                .actions
+                .iter()
+                .map(|action| {
+                    (
+                        action.rank,
+                        action.sequence,
+                        action.service.clone(),
+                        action.label.clone(),
+                    )
+                })
+                .collect();
+            actions.sort_by_key(|action| std::cmp::Reverse((action.0, action.1)));
+            actions
+                .into_iter()
+                .map(|(_, _, service, label)| (service, label))
+                .collect()
+        };
+        let progress = self.progress.lock().expect("progress runs no user code");
+        let pending = if registered.is_empty() {
+            progress.pending.clone()
+        } else {
+            registered
+        };
+        (progress.done.clone(), progress.current.clone(), pending)
+    }
+}
+
+/// Run one action to completion. Returns the action's error and its panic.
+/// A panic while dropping the action is reported as its panic too, without
+/// replacing an error the action returned; a panic while polling comes first.
+pub(crate) async fn run(action: Action) -> (Option<SharedError>, Option<Arc<str>>) {
+    let (output, release_panic) = Contained {
+        action: Some(action),
+    }
+    .await;
+    match output {
+        Ok(Ok(())) => (None, release_panic),
+        Ok(Err(error)) => (Some(Arc::from(error)), release_panic),
+        Err(message) => (None, Some(message)),
+    }
+}
+
+struct Contained {
+    action: Option<Action>,
+}
+
+impl Future for Contained {
+    type Output = (Result<Result<(), BoxError>, Arc<str>>, Option<Arc<str>>);
+
+    fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        let Some(action) = self.action.as_mut() else {
+            return Poll::Pending;
+        };
+        let polled = catch_unwind(AssertUnwindSafe(|| action.as_mut().poll(cx)));
+        let output = match polled {
+            Ok(Poll::Pending) => return Poll::Pending,
+            Ok(Poll::Ready(result)) => Ok(result),
+            Err(payload) => Err(panic_message(payload)),
+        };
+        // The action's captures are released before its result is published.
+        let action = self.action.take();
+        let release_panic = catch_unwind(AssertUnwindSafe(|| drop(action)))
+            .err()
+            .map(panic_message);
+        Poll::Ready((output, release_panic))
     }
 }

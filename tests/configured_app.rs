@@ -12,8 +12,9 @@ mod services;
 mod settings;
 
 use miju_services::{
-    App, BoxError, BuildError, RunError, observe::ShutdownProgress, report::ServiceFailure,
-    work::WorkSpec,
+    App, AppHandle, AssemblyError, BoxError, Failure, Phase, Report, RunError, Spec, StartError,
+    report::{Outcome, ServicePhase},
+    scope::Kind,
 };
 use services::SampleFile;
 use settings::Settings;
@@ -32,6 +33,7 @@ use std::{
 use tokio::{
     io::AsyncWrite,
     sync::{Notify, oneshot},
+    time::timeout,
 };
 
 static DIRECTORY: AtomicU64 = AtomicU64::new(0);
@@ -129,26 +131,52 @@ fn settings() -> Settings {
     Settings::new(5, PathBuf::from("unused-with-injected-writer")).unwrap()
 }
 
+fn cleanup_names(report: &Report) -> Vec<&str> {
+    report
+        .cleanup
+        .iter()
+        .map(|cleanup| cleanup.name.name())
+        .collect()
+}
+
+/// Poll `condition` between yields, for at most two seconds of real time.
+async fn until(condition: impl Fn() -> bool) {
+    let deadline = std::time::Instant::now() + Duration::from_secs(2);
+    while !condition() {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "condition not reached"
+        );
+        tokio::task::yield_now().await;
+    }
+}
+
 #[tokio::test(start_paused = true)]
 async fn configured_run_appends_samples_and_flushes_the_real_file() {
     let directory = TestDirectory::new();
     let path = directory.0.join("samples with spaces.log");
     std::fs::write(&path, "user-prefix\n").unwrap();
     let handle = bootstrap::assemble(Settings::new(5, path.clone()).unwrap())
-        .unwrap()
         .start()
         .unwrap();
-    handle.ready(Duration::from_secs(1)).await.unwrap();
+    handle.ready().await.unwrap();
+    assert!(
+        handle
+            .snapshot()
+            .pending_cleanup
+            .iter()
+            .any(|(service, name)| &**service == "sampler" && name.name() == "sample-file"),
+        "the output's close was not registered where it was acquired"
+    );
     tokio::time::advance(Duration::from_millis(5)).await;
     tokio::task::yield_now().await;
     let report = handle.shutdown().await.unwrap();
-    assert!(report.is_success());
+    assert!(report.is_success(), "{report}");
     assert!(
         report
-            .snapshot
             .cleanup
             .iter()
-            .any(|cleanup| { cleanup.label == "sample-file" && cleanup.is_success() }),
+            .any(|cleanup| cleanup.name.name() == "sample-file" && cleanup.is_success()),
         "registered initialization cleanup is missing"
     );
     let text = std::fs::read_to_string(&path).unwrap();
@@ -166,20 +194,19 @@ async fn configured_run_appends_samples_and_flushes_the_real_file() {
 }
 
 #[tokio::test]
-async fn shared_resource_close_is_registered_by_the_composition_root() {
+async fn a_handed_in_output_is_closed_by_the_application_that_received_it() {
     let directory = TestDirectory::new();
     let path = directory.0.join("output.log");
     let output = Arc::new(prebuilt::open_output(&path).await.unwrap());
     let handle = prebuilt::assemble(settings(), output.clone())
-        .unwrap()
         .start()
         .unwrap();
-    handle.ready(Duration::from_secs(1)).await.unwrap();
+    handle.ready().await.unwrap();
     output.record("buffered-before-stop\n").await.unwrap();
-    handle.shutdown().await.unwrap();
+    assert!(handle.shutdown().await.unwrap().is_success());
     assert!(
         output.record("late").await.is_err(),
-        "composition root omitted resource cleanup"
+        "the application omitted the output's close"
     );
     assert_eq!(
         std::fs::read_to_string(path).unwrap(),
@@ -188,7 +215,7 @@ async fn shared_resource_close_is_registered_by_the_composition_root() {
 }
 
 #[tokio::test]
-async fn bootstrap_rolls_back_build_refusal_and_keeps_rollback_error() {
+async fn bootstrap_closes_the_output_of_an_invalid_assembly_and_keeps_both_errors() {
     for fail in [false, true] {
         let state = Arc::new(Mutex::new(IoState::default()));
         let output = Arc::new(SampleFile::from_writer(Writer {
@@ -198,16 +225,15 @@ async fn bootstrap_rolls_back_build_refusal_and_keeps_rollback_error() {
             flush_panic: false,
         }));
         output.record("already-buffered").await.unwrap();
-        let error = prebuilt::finish(
-            Err(BuildError::Empty),
-            output.clone(),
-            pending::<io::Result<()>>(),
-        )
-        .await
-        .unwrap_err();
+        let error = prebuilt::finish(App::new(), output.clone(), pending::<io::Result<()>>())
+            .await
+            .unwrap_err();
         assert!(matches!(
-            error.source.downcast_ref::<BuildError>(),
-            Some(BuildError::Empty)
+            error.source.downcast_ref::<RunError>(),
+            Some(RunError::Start(StartError::Invalid {
+                error: AssemblyError::Empty,
+                ..
+            }))
         ));
         assert_eq!(error.rollback.is_some(), fail);
         if fail {
@@ -215,7 +241,7 @@ async fn bootstrap_rolls_back_build_refusal_and_keeps_rollback_error() {
         }
         assert!(
             output.record("late").await.is_err(),
-            "bootstrap lost pre-start rollback responsibility"
+            "bootstrap kept the output open after start was refused"
         );
         assert_eq!(state.lock().unwrap().bytes, b"already-buffered");
         assert!(
@@ -229,7 +255,7 @@ async fn bootstrap_rolls_back_build_refusal_and_keeps_rollback_error() {
 }
 
 #[test]
-fn bootstrap_rolls_back_start_refusal_with_original_error() {
+fn bootstrap_closes_the_output_when_there_is_no_runtime_and_keeps_the_original_error() {
     let state = Arc::new(Mutex::new(IoState::default()));
     let output = Arc::new(SampleFile::from_writer(Writer {
         label: "rollback",
@@ -249,7 +275,7 @@ fn bootstrap_rolls_back_start_refusal_with_original_error() {
     };
     assert!(matches!(
         error.source.downcast_ref::<RunError>(),
-        Some(RunError::Start(_))
+        Some(RunError::Start(StartError::NoRuntime { .. }))
     ));
     assert_eq!(error.rollback.unwrap().to_string(), "writer-flush-error");
     assert!(
@@ -258,6 +284,30 @@ fn bootstrap_rolls_back_start_refusal_with_original_error() {
             .unwrap()
             .events
             .contains(&"rollback:drop".to_string())
+    );
+}
+
+#[tokio::test]
+async fn bootstrap_closes_an_output_the_application_never_took_over() {
+    let state = Arc::new(Mutex::new(IoState::default()));
+    let output = Writer::output("unclaimed", &state);
+    // Stop is already resolved, so the driver stops before any service runs.
+    let report = prebuilt::finish(
+        prebuilt::assemble(settings(), output.clone()),
+        output.clone(),
+        std::future::ready(Ok::<(), io::Error>(())),
+    )
+    .await
+    .unwrap();
+    assert!(cleanup_names(&report).is_empty());
+    assert!(matches!(
+        report.service(prebuilt::OUTPUT).unwrap().outcome,
+        Some(Outcome::NotStarted)
+    ));
+    assert!(output.record("late").await.is_err());
+    assert_eq!(
+        state.lock().unwrap().events,
+        ["unclaimed:flush", "unclaimed:drop"]
     );
 }
 
@@ -272,9 +322,9 @@ fn recover_unstarted_assembly_without_premature_resource_close() {
     let output = runtime.block_on(async { Arc::new(prebuilt::open_output(&path).await.unwrap()) });
     drop(runtime);
     let error = prebuilt::assemble(settings(), output.clone())
-        .unwrap()
         .start()
         .unwrap_err();
+    assert!(matches!(error, StartError::NoRuntime { .. }));
     let app = error.into_app();
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_time()
@@ -283,7 +333,7 @@ fn recover_unstarted_assembly_without_premature_resource_close() {
     runtime.block_on(async {
         output.record("retained-for-retry\n").await.unwrap();
         let handle = app.start().unwrap();
-        handle.ready(Duration::from_secs(1)).await.unwrap();
+        handle.ready().await.unwrap();
         assert!(handle.shutdown().await.unwrap().is_success());
         assert!(output.record("late").await.is_err());
     });
@@ -294,49 +344,42 @@ fn recover_unstarted_assembly_without_premature_resource_close() {
 }
 
 #[tokio::test]
-async fn partial_initialization_failure_uses_the_same_global_lifo_stack() {
+async fn partial_initialization_failure_runs_every_registered_close_in_reverse_order() {
     let state = Arc::new(Mutex::new(IoState::default()));
     let init_state = state.clone();
     let outer = Writer::output("assembly", &state);
-    let cleanup = outer.clone();
-    let app = App::builder()
-        .cleanup("assembly", move || async move {
-            cleanup.close().await?;
-            Ok(())
-        })
-        .service_fn("initialization", move |context| async move {
+    let handed = outer.clone();
+    let mut app = App::new();
+    let file = app.resource(prebuilt::OUTPUT, move |ctx| async move {
+        let closing = handed.clone();
+        ctx.defer(prebuilt::OUTPUT, async move { closing.close().await })?;
+        Ok(handed)
+    });
+    app.service_fn(
+        Spec::new("initialization").after(&file),
+        move |ctx| async move {
             let acquired = Writer::output("initialization", &init_state);
             acquired.record("initialization-buffer\n").await?;
-            context
-                .defer_cleanup(
-                    "initialized-file",
-                    move || async move { acquired.close().await },
-                )
-                .unwrap();
-            Err(io::Error::other("initialization-original-error").into())
-        })
-        .build()
-        .unwrap();
-    let error = prebuilt::finish(Ok(app), outer, pending::<io::Result<()>>())
+            ctx.defer("initialized-file", async move { acquired.close().await })?;
+            Err::<(), BoxError>(io::Error::other("initialization-original-error").into())
+        },
+    );
+    let error = prebuilt::finish(app, outer, pending::<io::Result<()>>())
         .await
         .unwrap_err();
     assert!(
         error.rollback.is_none(),
-        "bootstrap closed accepted driver resources twice"
+        "bootstrap closed an output the application had taken over"
     );
     let error = error.source.downcast::<RunError>().unwrap();
     let report = error.report().unwrap();
-    assert!(
-        matches!(&report.snapshot.services[0].failures[0], ServiceFailure::Error(error) if error.to_string()=="initialization-original-error")
-    );
+    assert!(matches!(
+        &report.service("initialization").unwrap().failures[..],
+        [Failure::Error(error)] if error.to_string() == "initialization-original-error"
+    ));
     assert_eq!(
-        report
-            .snapshot
-            .cleanup
-            .iter()
-            .map(|c| c.label.as_str())
-            .collect::<Vec<_>>(),
-        ["initialized-file", "assembly"]
+        cleanup_names(report),
+        ["initialized-file", prebuilt::OUTPUT]
     );
     assert_eq!(
         state.lock().unwrap().events,
@@ -359,13 +402,11 @@ async fn resource_flush_error_and_panic_remain_in_the_final_report() {
             flush_error: !panic,
             flush_panic: panic,
         }));
-        let handle = prebuilt::assemble(settings(), output)
-            .unwrap()
-            .start()
-            .unwrap();
-        handle.ready(Duration::from_secs(1)).await.unwrap();
-        let error = handle.shutdown().await.unwrap_err();
-        let cleanup = &error.report().unwrap().snapshot.cleanup[0];
+        let handle = prebuilt::assemble(settings(), output).start().unwrap();
+        handle.ready().await.unwrap();
+        let report = handle.shutdown().await.unwrap();
+        assert!(!report.is_success());
+        let cleanup = &report.cleanup[0];
         assert!(!cleanup.is_success());
         if panic {
             assert!(
@@ -399,18 +440,26 @@ async fn pending_flush_stays_owned_until_actual_completion() {
     }));
     let output = Writer::output("slow", &state);
     let handle = prebuilt::assemble(settings(), output.clone())
-        .unwrap()
         .start()
         .unwrap();
-    handle.ready(Duration::from_secs(1)).await.unwrap();
-    let result = handle
-        .shutdown_within(Duration::from_millis(10))
-        .await
-        .unwrap();
-    let ShutdownProgress::Pending(snapshot) = result else {
-        panic!("unfinished flush was reported complete")
-    };
-    assert_eq!(snapshot.current_cleanup.as_deref(), Some("sample-file"));
+    handle.ready().await.unwrap();
+    handle.stop();
+    assert!(
+        timeout(Duration::from_millis(10), handle.wait())
+            .await
+            .is_err(),
+        "an unfinished flush was reported complete"
+    );
+    until(|| handle.snapshot().current_cleanup.is_some()).await;
+    let snapshot = handle.snapshot();
+    assert_eq!(snapshot.status.phase, Phase::Cleaning);
+    assert_eq!(
+        snapshot
+            .current_cleanup
+            .as_ref()
+            .map(|(_, name)| name.name()),
+        Some("sample-file")
+    );
     assert!(output.record("late").await.is_err());
     assert!(state.lock().unwrap().events.is_empty());
     let waker = {
@@ -419,7 +468,7 @@ async fn pending_flush_stays_owned_until_actual_completion() {
         state.waker.take()
     };
     waker.unwrap().wake();
-    assert!(handle.shutdown().await.unwrap().is_success());
+    assert!(handle.wait().await.unwrap().is_success());
     assert_eq!(state.lock().unwrap().events, ["slow:flush", "slow:drop"]);
 }
 
@@ -427,44 +476,41 @@ async fn pending_flush_stays_owned_until_actual_completion() {
 async fn accepted_child_releases_before_file_flush_and_close() {
     let state = Arc::new(Mutex::new(IoState::default()));
     let output = Writer::output("owned", &state);
-    let close = output.clone();
+    let handed = output.clone();
     let child = output.clone();
     let release = Arc::new(Notify::new());
     let child_release = release.clone();
     let (started, running) = oneshot::channel();
-    let app = App::builder()
-        .cleanup("file", move || async move {
-            close.close().await?;
-            Ok(())
-        })
-        .service_fn("writer", move |context| async move {
-            context
-                .work()
-                .spawn(WorkSpec::new("last-sample"), move |work| async move {
-                    started.send(()).unwrap();
-                    work.stopping().await;
-                    child_release.notified().await;
-                    child.record("last-child-write\n").await?;
-                    Ok::<(), BoxError>(())
-                })?;
-            context.ready();
-            context.stopping().await;
-            Ok(())
-        })
-        .build()
-        .unwrap()
-        .start()
-        .unwrap();
+    let mut app = App::new();
+    let file = app.resource("file", move |ctx| async move {
+        let closing = handed.clone();
+        ctx.defer("file", async move { closing.close().await })?;
+        Ok(handed)
+    });
+    app.service_fn(Spec::new("writer").after(&file), move |ctx| async move {
+        let stop = ctx.stop_token();
+        ctx.spawn("last-sample", async move {
+            started.send(()).unwrap();
+            stop.cancelled().await;
+            child_release.notified().await;
+            child.record("last-child-write\n").await?;
+            Ok::<(), BoxError>(())
+        })?;
+        ctx.ready();
+        ctx.stopping().await;
+        Ok(())
+    });
+    let handle = app.start().unwrap();
     running.await.unwrap();
-    assert!(matches!(
-        app.shutdown_within(Duration::from_millis(10))
+    handle.stop();
+    assert!(
+        timeout(Duration::from_millis(10), handle.wait())
             .await
-            .unwrap(),
-        ShutdownProgress::Pending(_)
-    ));
+            .is_err()
+    );
     assert!(state.lock().unwrap().events.is_empty());
     release.notify_one();
-    assert!(app.shutdown().await.unwrap().is_success());
+    assert!(handle.wait().await.unwrap().is_success());
     assert_eq!(state.lock().unwrap().bytes, b"last-child-write\n");
     assert_eq!(state.lock().unwrap().events, ["owned:flush", "owned:drop"]);
     assert!(output.record("late").await.is_err());
@@ -492,7 +538,7 @@ async fn prebuilt_invalid_output_directory_keeps_the_original_open_error() {
 fn unstarted_configured_app_acquires_no_output_resource() {
     let directory = TestDirectory::new();
     let path = directory.0.join("not-opened.log");
-    let app = bootstrap::assemble(Settings::new(5, path.clone()).unwrap()).unwrap();
+    let app = bootstrap::assemble(Settings::new(5, path.clone()).unwrap());
     assert!(!path.exists(), "assembly opened output before admission");
     let rejected = app.start().unwrap_err().into_app();
     assert!(!path.exists(), "rejected start opened output");
@@ -505,16 +551,15 @@ async fn stop_before_configured_initialization_does_not_open_output() {
     let directory = TestDirectory::new();
     let path = directory.0.join("not-admitted.log");
     let handle = bootstrap::assemble(Settings::new(5, path.clone()).unwrap())
-        .unwrap()
         .start()
         .unwrap();
     handle.stop();
     let report = handle.wait().await.unwrap();
     assert!(!path.exists(), "stopped initializer acquired an output");
-    assert!(report.snapshot.cleanup.is_empty());
+    assert!(report.cleanup.is_empty());
     assert!(matches!(
-        report.snapshot.services[0].outcome,
-        Some(miju_services::report::ServiceOutcome::CancelledBeforeStart)
+        report.services[0].outcome,
+        Some(Outcome::NotStarted)
     ));
 }
 
@@ -523,77 +568,22 @@ async fn configured_initialization_reports_the_original_open_error() {
     let directory = TestDirectory::new();
     let path = directory.0.join("absent/output.log");
     let error = bootstrap::assemble(Settings::new(5, path.clone()).unwrap())
-        .unwrap()
         .run_until(pending::<io::Result<()>>())
         .await
         .unwrap_err();
     let RunError::Failed { report } = error else {
         panic!("output open failure did not become a lifecycle failure");
     };
-    let ServiceFailure::Error(source) = &report.snapshot.services[0].failures[0] else {
+    let [Failure::Error(source)] = &report.services[0].failures[..] else {
         panic!("original output error was lost");
     };
     assert_eq!(
         source.downcast_ref::<io::Error>().unwrap().kind(),
         io::ErrorKind::NotFound
     );
-    assert!(report.is_drained() && !report.is_success());
-    assert!(report.snapshot.cleanup.is_empty());
+    assert!(!report.is_success());
+    assert!(report.cleanup.is_empty());
     assert!(!path.exists());
-}
-
-#[test]
-fn configured_acquisition_cannot_outlive_final_report() {
-    let directory = TestDirectory::new();
-    let path = directory.0.join("queued-open.log");
-    let runtime = tokio::runtime::Builder::new_current_thread()
-        .enable_time()
-        .max_blocking_threads(1)
-        .build()
-        .unwrap();
-    let (blocker, release) = hold_blocking_pool(&runtime);
-    let (handle, early_complete) = runtime.block_on(async {
-        tokio::time::pause();
-        let handle = bootstrap::assemble(Settings::new(5, path.clone()).unwrap())
-            .unwrap()
-            .start()
-            .unwrap();
-        for _ in 0..10 {
-            tokio::task::yield_now().await;
-        }
-        assert!(!path.exists());
-        handle.stop();
-        tokio::time::advance(Duration::from_secs(31)).await;
-        let progress = {
-            let observe = handle.shutdown_within(Duration::from_millis(1));
-            tokio::pin!(observe);
-            // Held blocking work prevents paused time from advancing automatically.
-            let first = std::future::poll_fn(|cx| Poll::Ready(observe.as_mut().poll(cx))).await;
-            match first {
-                Poll::Ready(result) => result.unwrap(),
-                Poll::Pending => {
-                    // Drive beyond timer-wheel rounding without changing its deadline.
-                    tokio::time::advance(Duration::from_millis(2)).await;
-                    observe.await.unwrap()
-                }
-            }
-        };
-        (handle, matches!(progress, ShutdownProgress::Complete(_)))
-    });
-    drop(release);
-    runtime.block_on(async {
-        blocker.await.unwrap();
-        // The single blocking worker fences the previously queued file open.
-        tokio::task::spawn_blocking(|| ()).await.unwrap();
-        if early_complete {
-            assert!(!path.exists(), "resource acquisition escaped final report");
-        }
-        let report = tokio::time::timeout(Duration::from_secs(1), handle.wait())
-            .await
-            .unwrap()
-            .unwrap();
-        assert!(report.is_drained());
-    });
 }
 
 struct BlockingPoolRelease(Option<std::sync::mpsc::Sender<()>>);
@@ -620,65 +610,103 @@ fn hold_blocking_pool(
     (blocker, release)
 }
 
-async fn wait_for_queued_open(handle: &miju_services::AppHandle) {
-    tokio::time::timeout(Duration::from_secs(2), async {
-        loop {
-            if handle.snapshot().services[0]
-                .work
-                .active
-                .iter()
-                .any(|work| work.kind == miju_services::work::WorkKind::Blocking && !work.started)
-            {
-                break;
-            }
+fn single_blocking_thread() -> tokio::runtime::Runtime {
+    tokio::runtime::Builder::new_current_thread()
+        .enable_time()
+        .max_blocking_threads(1)
+        .build()
+        .unwrap()
+}
+
+/// Works under paused time too: it never sleeps.
+async fn wait_for_queued_open(handle: &AppHandle) {
+    for _ in 0..100_000 {
+        if handle.snapshot().services[0]
+            .outstanding
+            .iter()
+            .any(|held| held.kind == Kind::Blocking && !held.started)
+        {
+            return;
+        }
+        tokio::task::yield_now().await;
+    }
+    panic!("initializer did not queue its owned open");
+}
+
+#[test]
+fn a_queued_open_holds_the_report_past_grace_and_never_runs() {
+    let directory = TestDirectory::new();
+    let path = directory.0.join("queued-open.log");
+    let runtime = single_blocking_thread();
+    let (blocker, release) = hold_blocking_pool(&runtime);
+    let handle = runtime.block_on(async {
+        tokio::time::pause();
+        let handle = bootstrap::assemble(Settings::new(5, path.clone()).unwrap())
+            .start()
+            .unwrap();
+        wait_for_queued_open(&handle).await;
+        handle.stop();
+        // The grace period runs from when the driver asks the service to stop.
+        until(|| handle.snapshot().services[0].phase == ServicePhase::Stopping).await;
+        // Past the grace period, with the open still queued behind the blocker.
+        tokio::time::advance(Duration::from_secs(31)).await;
+        for _ in 0..1_000 {
             tokio::task::yield_now().await;
         }
-    })
-    .await
-    .expect("initializer did not queue its owned open");
+        let snapshot = handle.snapshot();
+        assert!(snapshot.services[0].forced, "grace expiry sent no abort");
+        assert_ne!(
+            snapshot.status.phase,
+            Phase::Terminated,
+            "a report arrived while the open was still owned"
+        );
+        assert!(
+            snapshot.services[0]
+                .outstanding
+                .iter()
+                .any(|held| held.kind == Kind::Blocking && !held.started)
+        );
+        handle
+    });
+    drop(release);
+    runtime.block_on(async {
+        blocker.await.unwrap();
+        // The single blocking worker fences the previously queued file open.
+        tokio::task::spawn_blocking(|| ()).await.unwrap();
+        let report = timeout(Duration::from_secs(1), handle.wait())
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(!path.exists(), "a cancelled open ran after stop");
+        assert!(report.services[0].forced && !report.is_success());
+    });
 }
 
 #[test]
 fn configured_open_cancelled_before_start_is_a_successful_cooperative_stop() {
     let directory = TestDirectory::new();
     let path = directory.0.join("cancelled-open.log");
-    let runtime = tokio::runtime::Builder::new_current_thread()
-        .enable_time()
-        .max_blocking_threads(1)
-        .build()
-        .unwrap();
+    let runtime = single_blocking_thread();
     let (blocker, release) = hold_blocking_pool(&runtime);
     let handle = runtime.block_on(async {
         let handle = bootstrap::assemble(Settings::new(5, path.clone()).unwrap())
-            .unwrap()
             .start()
             .unwrap();
         wait_for_queued_open(&handle).await;
         handle.stop();
-        tokio::time::timeout(Duration::from_secs(2), async {
-            while !handle.snapshot().services[0].stopping {
-                tokio::task::yield_now().await;
-            }
-        })
-        .await
-        .unwrap();
+        until(|| handle.snapshot().services[0].phase == ServicePhase::Stopping).await;
         handle
     });
     drop(release);
     runtime.block_on(async {
         blocker.await.unwrap();
-        let report = tokio::time::timeout(Duration::from_secs(2), handle.wait())
+        let report = timeout(Duration::from_secs(2), handle.wait())
             .await
             .unwrap()
             .unwrap();
-        assert!(report.snapshot.services[0].work.recent.iter().any(|work| {
-            matches!(
-                work.outcome(),
-                miju_services::work::WorkOutcome::CancelledBeforeStart
-            )
-        }));
+        assert_eq!(report.services[0].work.cancelled, 1);
         assert!(!path.exists());
-        assert!(!report.snapshot.budget_exceeded);
+        assert!(!report.services[0].forced);
         assert!(
             report.is_success(),
             "queued acquisition cancelled by host stop became a lifecycle failure"
@@ -690,15 +718,10 @@ fn configured_open_cancelled_before_start_is_a_successful_cooperative_stop() {
 fn configured_open_io_error_is_retained_when_stop_precedes_delivery() {
     let directory = TestDirectory::new();
     let path = directory.0.join("absent/output.log");
-    let runtime = tokio::runtime::Builder::new_current_thread()
-        .enable_time()
-        .max_blocking_threads(1)
-        .build()
-        .unwrap();
+    let runtime = single_blocking_thread();
     let (blocker, release) = hold_blocking_pool(&runtime);
     let handle = runtime.block_on(async {
         let handle = bootstrap::assemble(Settings::new(5, path.clone()).unwrap())
-            .unwrap()
             .start()
             .unwrap();
         wait_for_queued_open(&handle).await;
@@ -713,12 +736,12 @@ fn configured_open_io_error_is_retained_when_stop_precedes_delivery() {
     runtime.block_on(async {
         blocker.await.unwrap();
         fence.await.unwrap();
-        let report = tokio::time::timeout(Duration::from_secs(2), handle.wait())
+        let report = timeout(Duration::from_secs(2), handle.wait())
             .await
             .unwrap()
             .unwrap();
         assert!(!report.is_success());
-        let ServiceFailure::Error(source) = &report.snapshot.services[0].failures[0] else {
+        let [Failure::Error(source)] = &report.services[0].failures[..] else {
             panic!("stop discarded the actual output error");
         };
         assert_eq!(

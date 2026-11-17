@@ -1,11 +1,7 @@
 #![forbid(unsafe_code)]
 
 use super::*;
-use crate::{
-    BoxError, Health,
-    service::{Lifetime, ServiceSpec, service_fn},
-    work::WorkSpec,
-};
+use crate::{BoxError, Health, Spec};
 use std::{
     collections::HashMap,
     sync::{
@@ -20,6 +16,7 @@ static NEXT: AtomicUsize = AtomicUsize::new(0);
 
 struct Fixture {
     builds: AtomicUsize,
+    created: AtomicUsize,
     drops: AtomicUsize,
     error_drops: AtomicUsize,
     assembly_drops: AtomicUsize,
@@ -28,16 +25,18 @@ struct Fixture {
     factory_open: Mutex<bool>,
     factory_changed: Condvar,
     cleanup_gate: Semaphore,
+    fail_gate: Semaphore,
     blocking_entered: AtomicBool,
     blocking_open: Mutex<bool>,
     blocking_changed: Condvar,
-    core_observer: Mutex<Option<(crate::observe::AppObserver, tokio::runtime::Handle)>>,
+    core_observer: Mutex<Option<(Observer, tokio::runtime::Handle)>>,
 }
 
 fn fixture() -> (String, Arc<Fixture>) {
     let key = NEXT.fetch_add(1, Ordering::SeqCst).to_string();
     let fixture = Arc::new(Fixture {
         builds: AtomicUsize::new(0),
+        created: AtomicUsize::new(0),
         drops: AtomicUsize::new(0),
         error_drops: AtomicUsize::new(0),
         assembly_drops: AtomicUsize::new(0),
@@ -46,6 +45,7 @@ fn fixture() -> (String, Arc<Fixture>) {
         factory_open: Mutex::new(false),
         factory_changed: Condvar::new(),
         cleanup_gate: Semaphore::new(0),
+        fail_gate: Semaphore::new(0),
         blocking_entered: AtomicBool::new(false),
         blocking_open: Mutex::new(false),
         blocking_changed: Condvar::new(),
@@ -117,87 +117,88 @@ fn factory(args: Vec<String>) -> Result<App, BuildError> {
     }
     let finite = mode.starts_with("finite");
     let assembly = AssemblyCapture(fixture.clone());
-    App::builder()
-        .service(
-            ServiceSpec::new("root").lifetime(if finite {
-                Lifetime::Finite
-            } else {
-                Lifetime::Resident
-            }),
-            service_fn(move |context| async move {
-                let _assembly = assembly;
-                let resource = Resource(fixture.clone());
-                let cleanup_fixture = fixture.clone();
-                let slow = mode == "slow-cleanup";
-                let cleanup_failed = mode == "finite-cleanup-fail";
-                context
-                    .defer_cleanup("resource", move || async move {
-                        cleanup_fixture
-                            .cleanup_started
-                            .store(true, Ordering::SeqCst);
-                        if slow {
-                            cleanup_fixture
-                                .cleanup_gate
-                                .acquire()
-                                .await
-                                .unwrap()
-                                .forget();
-                        }
-                        drop(resource);
-                        if cleanup_failed {
-                            Err::<(), BoxError>(Box::new(SecretError(cleanup_fixture)))
-                        } else {
-                            Ok(())
-                        }
-                    })
-                    .map_err(|_| std::io::Error::other("cleanup registration rejected"))?;
-                if mode == "blocking" {
-                    let blocking_fixture = fixture.clone();
-                    context
-                        .work()
-                        .spawn_blocking(WorkSpec::new("blocking"), move |_| {
-                            blocking_fixture
-                                .blocking_entered
-                                .store(true, Ordering::SeqCst);
-                            let mut open = blocking_fixture.blocking_open.lock().unwrap();
-                            while !*open {
-                                open = blocking_fixture.blocking_changed.wait(open).unwrap();
-                            }
-                            Ok::<(), BoxError>(())
-                        })?;
+    let spec = if finite {
+        Spec::new("root").finite()
+    } else {
+        Spec::new("root")
+    };
+    let mut app = App::new();
+    app.service_fn(spec, move |context| async move {
+        let _assembly = assembly;
+        fixture.created.fetch_add(1, Ordering::SeqCst);
+        let resource = Resource(fixture.clone());
+        let cleanup_fixture = fixture.clone();
+        let slow = mode == "slow-cleanup" || mode == "late-fail-slow";
+        let cleanup_failed = mode == "finite-cleanup-fail";
+        context
+            .defer("resource", async move {
+                cleanup_fixture
+                    .cleanup_started
+                    .store(true, Ordering::SeqCst);
+                if slow {
+                    cleanup_fixture
+                        .cleanup_gate
+                        .acquire()
+                        .await
+                        .unwrap()
+                        .forget();
                 }
-                if mode == "runtime-blocking" {
-                    *fixture.core_observer.lock().unwrap() =
-                        Some((context.observer(), tokio::runtime::Handle::current()));
-                    let blocking = fixture.clone();
-                    // Deliberately outside WorkScope: core drain must precede runtime release.
-                    tokio::task::spawn_blocking(move || {
-                        blocking.blocking_entered.store(true, Ordering::SeqCst);
-                        let mut open = blocking.blocking_open.lock().unwrap();
-                        while !*open {
-                            open = blocking.blocking_changed.wait(open).unwrap();
-                        }
-                    });
+                drop(resource);
+                if cleanup_failed {
+                    Err::<(), BoxError>(Box::new(SecretError(cleanup_fixture)))
+                } else {
+                    Ok(())
                 }
-                if mode == "unknown" {
-                    context.set_health(Health::Unknown);
+            })
+            .map_err(|_| std::io::Error::other("cleanup registration rejected"))?;
+        if mode == "blocking" {
+            let blocking_fixture = fixture.clone();
+            context.spawn_blocking("blocking", move || {
+                blocking_fixture
+                    .blocking_entered
+                    .store(true, Ordering::SeqCst);
+                let mut open = blocking_fixture.blocking_open.lock().unwrap();
+                while !*open {
+                    open = blocking_fixture.blocking_changed.wait(open).unwrap();
                 }
-                context.ready();
-                if mode == "finite-fail" {
-                    return Err::<(), BoxError>(Box::new(SecretError(fixture)));
+                Ok::<(), BoxError>(())
+            })?;
+        }
+        if mode == "runtime-blocking" {
+            *fixture.core_observer.lock().unwrap() =
+                Some((context.app(), tokio::runtime::Handle::current()));
+            let blocking = fixture.clone();
+            // Deliberately unmanaged: core drain must precede runtime release.
+            tokio::task::spawn_blocking(move || {
+                blocking.blocking_entered.store(true, Ordering::SeqCst);
+                let mut open = blocking.blocking_open.lock().unwrap();
+                while !*open {
+                    open = blocking.blocking_changed.wait(open).unwrap();
                 }
-                if finite {
-                    return Ok::<(), BoxError>(());
-                }
-                context.stopping().await;
-                if mode == "post-fail" {
-                    return Err(Box::new(SecretError(fixture)) as BoxError);
-                }
-                Ok(())
-            }),
-        )
-        .build()
-        .map_err(|_| BuildError::new(BuildErrorKind::Startup, "test assembly failed"))
+            });
+        }
+        if mode == "unknown" {
+            context.set_health(Health::Unknown);
+        }
+        context.ready();
+        if mode == "late-fail-slow" {
+            // Fails after availability without any stop request from Java.
+            fixture.fail_gate.acquire().await.unwrap().forget();
+            return Err::<(), BoxError>(Box::new(SecretError(fixture)));
+        }
+        if mode == "finite-fail" {
+            return Err::<(), BoxError>(Box::new(SecretError(fixture)));
+        }
+        if finite {
+            return Ok::<(), BoxError>(());
+        }
+        context.stopping().await;
+        if mode == "post-fail" {
+            return Err(Box::new(SecretError(fixture)) as BoxError);
+        }
+        Ok(())
+    });
+    Ok(app)
 }
 
 fn bridge(timeout: Duration) -> Arc<Bridge> {
@@ -280,6 +281,23 @@ fn stop_waiters_have_independent_budgets_and_cleanup_keeps_slot() {
 }
 
 #[test]
+fn a_self_stop_after_availability_is_reported_as_stopping_while_it_drains() {
+    let (key, fixture) = fixture();
+    let bridge = bridge(Duration::from_secs(2));
+    assert_eq!(bridge.start(vec![key, "late-fail-slow".into()]), 0);
+    assert_eq!(bridge.status(), RUNNING);
+    fixture.fail_gate.add_permits(1);
+    // The owner observes the phase asynchronously; the held cleanup keeps it
+    // draining, so STOPPING has to appear before the gate opens.
+    until(|| fixture.cleanup_started.load(Ordering::SeqCst));
+    until(|| bridge.status() == STOPPING);
+    fixture.cleanup_gate.add_permits(1);
+    until(|| bridge.status() == FAILED);
+    assert_eq!(bridge.stop(0), NOT_RUNNING);
+    assert!(!bridge.last_error().contains("secret-test"));
+}
+
+#[test]
 fn stop_during_factory_is_persistent_and_never_publishes_running() {
     let (key, fixture) = fixture();
     let bridge = bridge(Duration::from_secs(2));
@@ -313,9 +331,16 @@ fn startup_deadline_latches_stop_even_while_factory_is_blocked() {
 #[test]
 fn initialized_unknown_health_does_not_satisfy_start() {
     let (key, fixture) = fixture();
-    let bridge = bridge(Duration::from_millis(30));
+    // Long enough for the root to run and initialize first, even emulated;
+    // too short a budget would expire before that and test nothing.
+    let bridge = bridge(Duration::from_millis(500));
     assert_eq!(bridge.start(vec![key, "unknown".into()]), STARTUP_FAILED);
     until(|| bridge.status() == FAILED);
+    assert_eq!(
+        fixture.created.load(Ordering::SeqCst),
+        1,
+        "the service never initialized within the start budget"
+    );
     assert_eq!(fixture.drops.load(Ordering::SeqCst), 1);
 }
 

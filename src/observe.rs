@@ -1,313 +1,369 @@
-//! Read-only lifecycle observations that do not keep an application running.
+//! Control and observation of a started application.
+//!
+//! The lifecycle driver runs independently. Waiting on a handle, or dropping
+//! the wait, never affects it. Only two things end a wait for completion: the
+//! final [`Report`], or the loss of the driver.
 #![forbid(unsafe_code)]
 
-use crate::report::{AppSnapshot, ExitReport};
+use crate::{
+    cleanup::Cleanup,
+    report::{Health, Outstanding, Phase, Report, ServicePhase, ServiceSnapshot, Snapshot, Status},
+    service::ServiceCell,
+};
 use std::{
     fmt,
-    sync::{Arc, Mutex},
-    time::Duration,
+    sync::{
+        Arc, OnceLock,
+        atomic::{AtomicBool, Ordering},
+    },
 };
 use tokio::{
     sync::{Notify, watch},
     time::Instant,
 };
 
-/// The independent driver disappeared without a final completion certificate.
-#[derive(Clone, Debug, thiserror::Error)]
-#[error("lifecycle driver was lost before actual completion")]
-pub struct DriverLost {
-    /// Last known state. Pending responsibility must not be treated as drained.
-    pub snapshot: Arc<AppSnapshot>,
+/// How many outstanding items one service lists in a snapshot.
+const LISTED: usize = 64;
+
+/// What the driver pushes on lifecycle transitions.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct Published {
+    pub(crate) status: Status,
+    /// A required service has failed.
+    pub(crate) required_failed: bool,
 }
 
-/// Readiness observation failed without cancelling initialization.
-#[derive(Clone, Debug, thiserror::Error)]
-pub enum ReadyError {
-    /// The observation interval expired; initialization may still finish.
-    #[error("readiness observation timed out")]
-    Timeout(Arc<AppSnapshot>),
-    /// Stop or termination occurred before the application was ready.
-    #[error("application stopped before readiness")]
-    StoppedBeforeReady(Arc<AppSnapshot>),
-    /// Required initialization or execution failed.
-    #[error("required service failed before readiness")]
-    Failed(Arc<AppSnapshot>),
-    /// No driver remains to complete initialization.
-    #[error(transparent)]
-    DriverLost(#[from] DriverLost),
+/// State shared by the driver, the handles and every service context.
+pub(crate) struct Core {
+    pub(crate) published: watch::Sender<Published>,
+    stop: AtomicBool,
+    /// The driver's private wake. `notify_one` stores a permit if it is busy.
+    wake: Arc<Notify>,
+    pub(crate) services: Vec<Arc<ServiceCell>>,
+    pub(crate) cleanup: Cleanup,
+    pub(crate) report: OnceLock<Arc<Report>>,
+    lost: AtomicBool,
+    pub(crate) started: Instant,
 }
 
-/// Bounded observation of actual shutdown, independent of lifecycle success.
-#[derive(Clone, Debug)]
-pub enum ShutdownProgress {
-    /// All ownership and cleanup really ended; inspect success separately.
-    Complete(Arc<ExitReport>),
-    /// Responsibility is still held by the driver.
-    Pending(Arc<AppSnapshot>),
-}
-
-struct State {
-    snapshot: Arc<AppSnapshot>,
-    report: Option<Arc<ExitReport>>,
-    stop_at: Option<Instant>,
-}
-
-pub(crate) struct Shared {
-    state: Mutex<State>,
-    updates: watch::Sender<Arc<AppSnapshot>>,
-    pub(crate) wake: Arc<Notify>,
-}
-
-impl Shared {
-    pub(crate) fn new(snapshot: AppSnapshot, wake: Arc<Notify>) -> Arc<Self> {
-        let snapshot = Arc::new(snapshot);
-        let (updates, _) = watch::channel(snapshot.clone());
+impl Core {
+    pub(crate) fn new(services: Vec<Arc<ServiceCell>>, wake: Arc<Notify>) -> Arc<Self> {
+        let (published, _) = watch::channel(Published {
+            status: Status {
+                phase: Phase::Starting,
+                ready: false,
+                health: Health::Unknown,
+            },
+            required_failed: false,
+        });
         Arc::new(Self {
-            state: Mutex::new(State {
-                snapshot,
-                report: None,
-                stop_at: None,
-            }),
-            updates,
+            published,
+            stop: AtomicBool::new(false),
             wake,
+            services,
+            cleanup: Cleanup::default(),
+            report: OnceLock::new(),
+            lost: AtomicBool::new(false),
+            started: Instant::now(),
         })
     }
 
-    pub(crate) fn stop(&self) {
-        let mut state = self.state.lock().unwrap();
-        if state.stop_at.is_some() || state.report.is_some() {
+    pub(crate) fn wake(&self) {
+        self.wake.notify_one();
+    }
+
+    pub(crate) fn wake_handle(&self) -> &Notify {
+        &self.wake
+    }
+
+    pub(crate) fn stop_requested(&self) -> bool {
+        self.stop.load(Ordering::Acquire)
+    }
+
+    /// Record the request once, withdraw readiness at once, wake the driver.
+    pub(crate) fn request_stop(&self) {
+        if self.stop.swap(true, Ordering::AcqRel) {
             return;
         }
-        state.stop_at = Some(Instant::now());
-        let mut snapshot = (*state.snapshot).clone();
-        snapshot.ready = false;
-        let snapshot = Arc::new(snapshot);
-        let old = std::mem::replace(&mut state.snapshot, snapshot.clone());
-        let old_watch = self.updates.send_replace(snapshot);
-        drop(state);
-        drop((old, old_watch));
-        self.wake.notify_waiters();
+        self.published.send_if_modified(|published| {
+            let status = &mut published.status;
+            let before = *status;
+            status.ready = false;
+            if matches!(status.phase, Phase::Starting | Phase::Running) {
+                status.phase = Phase::Stopping;
+            }
+            before != *status
+        });
+        self.wake();
     }
 
-    pub(crate) fn stop_at(&self) -> Option<Instant> {
-        self.state.lock().unwrap().stop_at
+    pub(crate) fn mark_lost(&self) {
+        self.lost.store(true, Ordering::Release);
+        self.published.send_modify(|published| {
+            published.status.phase = Phase::Lost;
+            published.status.ready = false;
+        });
     }
 
-    // Only registration bookkeeping runs here, never a user factory or destructor.
-    pub(crate) fn admit_start<T>(&self, admit: impl FnOnce() -> T) -> Option<T> {
-        let state = self.state.lock().unwrap();
-        if state.stop_at.is_some() {
-            return None;
+    fn is_lost(&self) -> bool {
+        self.lost.load(Ordering::Acquire)
+    }
+
+    pub(crate) fn status(&self) -> Status {
+        self.published.borrow().status
+    }
+
+    pub(crate) fn service_snapshot(cell: &ServiceCell) -> ServiceSnapshot {
+        let drained = cell.scope.is_drained();
+        let stopping = cell.scope.stop_token().is_cancelled();
+        let listed = cell.scope.list(LISTED);
+        let total = cell.scope.count();
+        let state = cell.state();
+        let phase = if state.not_started || (state.started && drained) {
+            ServicePhase::Done
+        } else if !state.started {
+            ServicePhase::Waiting
+        } else if state.root.is_some() {
+            ServicePhase::Draining
+        } else if stopping {
+            ServicePhase::Stopping
+        } else if state.initialized {
+            ServicePhase::Running
+        } else {
+            ServicePhase::Starting
+        };
+        ServiceSnapshot {
+            name: cell.name.clone(),
+            required: cell.required,
+            finite: cell.finite,
+            phase,
+            initialized: state.initialized,
+            health: state.health,
+            outcome: if state.not_started {
+                Some(crate::report::Outcome::NotStarted)
+            } else {
+                state.root.as_ref().map(|root| root.outcome.clone())
+            },
+            failures: state.failures.clone(),
+            work: cell.scope.counters(),
+            recent_faults: cell.scope.recent_faults(),
+            forced: cell.scope.was_forced(),
+            outstanding: listed
+                .into_iter()
+                .map(|item| Outstanding {
+                    service: cell.name.clone(),
+                    kind: item.kind,
+                    name: item.label,
+                    started: item.started,
+                    unconfirmed: item.unconfirmed,
+                })
+                .collect(),
+            outstanding_total: total,
+            detail: cell
+                .detail
+                .lock()
+                .expect("detail runs no user code")
+                .clone(),
         }
-        let admitted = admit();
-        drop(state);
-        Some(admitted)
     }
 
-    pub(crate) fn publish(&self, mut snapshot: AppSnapshot) -> Arc<AppSnapshot> {
-        let mut state = self.state.lock().unwrap();
-        snapshot.ready &= state.stop_at.is_none();
-        snapshot.driver_lost |= state.snapshot.driver_lost;
-        let snapshot = Arc::new(snapshot);
-        let old = std::mem::replace(&mut state.snapshot, snapshot.clone());
-        let old_watch = self.updates.send_replace(snapshot.clone());
-        drop(state);
-        crate::task::retire((old, old_watch));
-        snapshot
-    }
-
-    pub(crate) fn finish(&self, report: Arc<ExitReport>) {
-        let old = self.state.lock().unwrap().report.replace(report);
-        drop(old);
-        // Subscribers also wake for the report, even when the final snapshot is unchanged.
-        self.updates.send_modify(|_| {});
-    }
-
-    pub(crate) fn lost(&self) {
-        let mut snapshot = (*self.snapshot()).clone();
-        snapshot.driver_lost = true;
-        snapshot.ready = false;
-        self.publish(snapshot);
-    }
-
-    fn snapshot(&self) -> Arc<AppSnapshot> {
-        self.state.lock().unwrap().snapshot.clone()
+    pub(crate) fn snapshot(&self) -> Snapshot {
+        let (cleanup, current_cleanup, pending_cleanup) = self.cleanup.observe();
+        Snapshot {
+            status: self.status(),
+            services: self
+                .services
+                .iter()
+                .map(|cell| Self::service_snapshot(cell))
+                .collect(),
+            cleanup,
+            current_cleanup,
+            pending_cleanup,
+        }
     }
 }
 
-/// A cloneable observer, with no application control lease.
+/// The driver is gone and no report exists. Completion is unknown; this is
+/// the last state that could be observed.
+#[derive(Clone, Debug, thiserror::Error)]
+#[error("the lifecycle driver was lost before completion")]
+pub struct Lost {
+    /// The last observable state. Outstanding items may still be held.
+    pub snapshot: Box<Snapshot>,
+}
+
+/// Why the application will not become ready.
+#[derive(Clone, Debug, thiserror::Error)]
+pub enum NotReady {
+    /// A required service failed first.
+    #[error("a required service failed before the application was ready")]
+    Failed(Box<Snapshot>),
+    /// Stop was requested, or the application ended, first.
+    #[error("the application stopped before it was ready")]
+    Stopped(Box<Snapshot>),
+    /// The driver is gone.
+    #[error(transparent)]
+    Lost(#[from] Lost),
+}
+
+/// Observes an application without holding a control lease on it.
 #[derive(Clone)]
-pub struct AppObserver {
-    pub(crate) shared: Arc<Shared>,
+pub struct Observer {
+    core: Arc<Core>,
 }
 
-impl fmt::Debug for AppObserver {
+impl fmt::Debug for Observer {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("AppObserver")
-            .field("snapshot", &self.snapshot())
+        f.debug_struct("Observer")
+            .field("status", &self.status())
             .finish()
     }
 }
 
-impl AppObserver {
-    /// Read the latest coherent snapshot.
-    pub fn snapshot(&self) -> Arc<AppSnapshot> {
-        self.shared.snapshot()
+impl Observer {
+    pub(crate) fn new(core: Arc<Core>) -> Self {
+        Self { core }
     }
 
-    /// Subscribe to coalesced current state; no event history is implied.
-    pub fn subscribe(&self) -> SnapshotReceiver {
-        SnapshotReceiver {
-            receiver: self.shared.updates.subscribe(),
-        }
+    /// Phase, readiness and health, as last pushed by the driver.
+    pub fn status(&self) -> Status {
+        self.core.status()
     }
 
-    /// Wait for actual final release; a business failure remains an Ok report.
-    pub async fn wait(&self) -> Result<Arc<ExitReport>, DriverLost> {
-        let mut receiver = self.shared.updates.subscribe();
+    /// A detailed view assembled now, including what is still outstanding.
+    pub fn snapshot(&self) -> Snapshot {
+        self.core.snapshot()
+    }
+
+    /// Resolves when the status next changes.
+    pub async fn changed(&self) -> Status {
+        let mut published = self.core.published.subscribe();
+        published.mark_unchanged();
+        let _ = published.changed().await;
+        self.status()
+    }
+
+    /// Resolves when the application is ready, or with the reason it will not
+    /// be. Dropping the wait has no effect; bound it with a timeout if needed.
+    pub async fn ready(&self) -> Result<(), NotReady> {
+        let mut published = self.core.published.subscribe();
         loop {
-            {
-                let state = self.shared.state.lock().unwrap();
-                if let Some(report) = &state.report {
-                    return Ok(report.clone());
-                }
-                if state.snapshot.driver_lost {
-                    return Err(DriverLost {
-                        snapshot: state.snapshot.clone(),
-                    });
-                }
+            let current = *published.borrow_and_update();
+            if self.core.is_lost() {
+                return Err(self.lost().into());
             }
-            let _ = receiver.changed().await;
-        }
-    }
-
-    /// Wait for current readiness, including required health, within an observation budget.
-    pub async fn ready(&self, within: Duration) -> Result<Arc<AppSnapshot>, ReadyError> {
-        let observe = async {
-            let mut receiver = self.subscribe();
-            loop {
-                let snapshot = receiver.current();
-                if snapshot.driver_lost {
-                    return Err(ReadyError::DriverLost(DriverLost { snapshot }));
-                }
-                if snapshot.ready {
-                    return Ok(snapshot);
-                }
-                if snapshot.services.iter().any(|s| {
-                    s.criticality == crate::service::Criticality::Required && !s.failures.is_empty()
-                }) {
-                    return Err(ReadyError::Failed(snapshot));
-                }
-                if matches!(
-                    snapshot.phase,
-                    crate::report::Phase::Stopping
-                        | crate::report::Phase::Cleaning
-                        | crate::report::Phase::Terminated
-                ) || self.shared.stop_at().is_some()
-                {
-                    return Err(ReadyError::StoppedBeforeReady(snapshot));
-                }
-                let _ = receiver.changed().await;
+            if current.status.ready {
+                return Ok(());
             }
-        };
-        tokio::time::timeout(within, observe)
-            .await
-            .unwrap_or_else(|_| Err(ReadyError::Timeout(self.snapshot())))
+            if current.required_failed {
+                return Err(NotReady::Failed(Box::new(self.snapshot())));
+            }
+            if !matches!(current.status.phase, Phase::Starting | Phase::Running) {
+                return Err(NotReady::Stopped(Box::new(self.snapshot())));
+            }
+            if published.changed().await.is_err() {
+                return Err(self.lost().into());
+            }
+        }
     }
 
-    /// Observe actual completion for a bounded interval, without requesting stop.
-    pub async fn drain(&self, within: Duration) -> Result<ShutdownProgress, DriverLost> {
-        match tokio::time::timeout(within, self.wait()).await {
-            Ok(result) => result.map(ShutdownProgress::Complete),
-            Err(_) => Ok(ShutdownProgress::Pending(self.snapshot())),
+    /// Resolves only at actual completion, or when the driver is lost.
+    ///
+    /// A report is not a verdict: check [`Report::is_success`]. Dropping the
+    /// wait changes nothing; a later call resolves the same way.
+    pub async fn wait(&self) -> Result<Arc<Report>, Lost> {
+        let mut published = self.core.published.subscribe();
+        loop {
+            published.mark_unchanged();
+            if let Some(report) = self.core.report.get() {
+                return Ok(report.clone());
+            }
+            if self.core.is_lost() {
+                return Err(self.lost());
+            }
+            if published.changed().await.is_err() {
+                return Err(self.lost());
+            }
+        }
+    }
+
+    fn lost(&self) -> Lost {
+        Lost {
+            snapshot: Box::new(self.snapshot()),
         }
     }
 }
 
-/// A watch-style current snapshot and change notification.
-#[derive(Debug)]
-pub struct SnapshotReceiver {
-    receiver: watch::Receiver<Arc<AppSnapshot>>,
+struct Control {
+    core: Arc<Core>,
 }
 
-impl SnapshotReceiver {
-    /// Read the current snapshot without waiting.
-    pub fn current(&self) -> Arc<AppSnapshot> {
-        self.receiver.borrow().clone()
-    }
-
-    /// Wait for another publication. Intermediate snapshots may be coalesced.
-    pub async fn changed(&mut self) -> Option<Arc<AppSnapshot>> {
-        self.receiver.changed().await.ok()?;
-        Some(self.receiver.borrow_and_update().clone())
+impl Drop for Control {
+    fn drop(&mut self) {
+        self.core.request_stop();
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::{
-        cleanup::{CleanupId, CleanupReport},
-        report::{Health, Phase},
-    };
-    use std::{
-        panic::{AssertUnwindSafe, catch_unwind},
-        sync::atomic::{AtomicUsize, Ordering},
-    };
+/// Controls a started application. Dropping the last clone requests stop.
+#[derive(Clone)]
+pub struct AppHandle {
+    control: Arc<Control>,
+}
 
-    #[derive(Debug)]
-    struct RetiredError(Arc<AtomicUsize>);
+impl fmt::Debug for AppHandle {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("AppHandle")
+            .field("status", &self.status())
+            .finish()
+    }
+}
 
-    impl fmt::Display for RetiredError {
-        fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-            f.write_str("retired snapshot error")
+impl AppHandle {
+    pub(crate) fn new(core: Arc<Core>) -> Self {
+        Self {
+            control: Arc::new(Control { core }),
         }
     }
 
-    impl std::error::Error for RetiredError {}
-
-    impl Drop for RetiredError {
-        fn drop(&mut self) {
-            self.0.fetch_add(1, Ordering::SeqCst);
-            panic!("retired-snapshot-drop");
-        }
+    /// A handle that observes without keeping the application running.
+    pub fn observer(&self) -> Observer {
+        Observer::new(self.control.core.clone())
     }
 
-    fn snapshot() -> AppSnapshot {
-        AppSnapshot {
-            phase: Phase::Running,
-            ready: true,
-            health: Health::Healthy,
-            services: Vec::new(),
-            current_cleanup: None,
-            pending_cleanup: Vec::new(),
-            cleanup: Vec::new(),
-            budget_exceeded: false,
-            driver_lost: false,
-        }
+    /// See [`Observer::status`].
+    pub fn status(&self) -> Status {
+        self.control.core.status()
     }
 
-    #[test]
-    fn retiring_a_snapshot_error_does_not_unwind_publication() {
-        let drops = Arc::new(AtomicUsize::new(0));
-        let mut old = snapshot();
-        old.cleanup.push(CleanupReport {
-            id: CleanupId(1),
-            label: "retired".into(),
-            error: Some(Arc::new(RetiredError(drops.clone()))),
-            panic: None,
-            release_panic: None,
-        });
-        let shared = Shared::new(old, Arc::new(Notify::new()));
-        // Cloning the same snapshot during stop must retain its errors.
-        shared.stop();
-        assert_eq!(drops.load(Ordering::SeqCst), 0);
-        let published = catch_unwind(AssertUnwindSafe(|| shared.publish(snapshot())));
-        assert_eq!(drops.load(Ordering::SeqCst), 1);
-        assert!(
-            published.is_ok(),
-            "retired snapshot error escaped snapshot publication"
-        );
-        assert!(!shared.snapshot().driver_lost);
+    /// See [`Observer::snapshot`].
+    pub fn snapshot(&self) -> Snapshot {
+        self.control.core.snapshot()
+    }
+
+    /// See [`Observer::changed`].
+    pub async fn changed(&self) -> Status {
+        self.observer().changed().await
+    }
+
+    /// See [`Observer::ready`].
+    pub async fn ready(&self) -> Result<(), NotReady> {
+        self.observer().ready().await
+    }
+
+    /// Request dependency-ordered stop. Readiness is withdrawn at once.
+    /// Repeated calls change nothing. This is a request, not completion.
+    pub fn stop(&self) {
+        self.control.core.request_stop();
+    }
+
+    /// See [`Observer::wait`].
+    pub async fn wait(&self) -> Result<Arc<Report>, Lost> {
+        self.observer().wait().await
+    }
+
+    /// Request stop and wait for actual completion. No deadline.
+    pub async fn shutdown(&self) -> Result<Arc<Report>, Lost> {
+        self.stop();
+        self.wait().await
     }
 }

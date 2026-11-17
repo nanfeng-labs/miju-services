@@ -1,13 +1,12 @@
 //! Application admission, retry-chain receipts and explicit queued-job cancellation.
-#![cfg(feature = "miju")]
 #[path = "../examples/support/queue.rs"]
 mod queue;
 
-use miju::{
-    layers::retry::RetryPolicy,
-    prelude::{WorkerBuilder, WorkerBuilderExt},
+use miju::prelude::{RetryPolicy, WorkerBuilder, WorkerBuilderExt};
+use miju_services::{
+    App, BoxError,
+    miju::{MijuStats, worker},
 };
-use miju_services::{App, BoxError, miju::worker_from};
 use queue::{Job, Queue, Receipt, Receipts, Submission};
 use std::{
     io,
@@ -40,33 +39,30 @@ async fn capacity_includes_running_and_same_target_skips_until_actual_release() 
     let entered = Arc::new(Mutex::new(Some(entered)));
     let (release, gate) = oneshot::channel();
     let gate = Arc::new(Mutex::new(Some(gate)));
-    let app = App::builder()
-        .service(
-            "jobs",
-            worker_from(move |context| {
-                WorkerBuilder::new(context)
-                    .backend(backend)
-                    .layer(Receipts)
-                    .layer(tower::limit::ConcurrencyLimitLayer::new(1))
-                    .build(move |_: Job| {
-                        let entered = entered.lock().unwrap().take();
-                        let gate = gate.lock().unwrap().take();
-                        async move {
-                            if let Some(entered) = entered {
-                                entered.send(()).unwrap();
-                            }
-                            if let Some(gate) = gate {
-                                gate.await.unwrap();
-                            }
+    let mut app = App::new();
+    app.service(
+        "jobs",
+        worker(move |seat| {
+            WorkerBuilder::new(&seat)
+                .backend(backend)
+                .layer(Receipts)
+                .layer(tower::limit::ConcurrencyLimitLayer::new(1))
+                .build(move |_: Job| {
+                    let entered = entered.lock().unwrap().take();
+                    let gate = gate.lock().unwrap().take();
+                    async move {
+                        if let Some(entered) = entered {
+                            entered.send(()).unwrap();
                         }
-                    })
-                    .stream()
-            }),
-        )
-        .build()
-        .unwrap()
-        .start()
-        .unwrap();
+                        if let Some(gate) = gate {
+                            gate.await.unwrap();
+                        }
+                    }
+                })
+                .stream()
+        }),
+    );
+    let app = app.start().unwrap();
     started.await.unwrap();
     assert!(
         matches!(queue.submit("third"), Submission::Busy),
@@ -87,31 +83,28 @@ async fn receipt_observes_final_retry_result_not_first_attempt() {
     let receipt = accepted(queue.submit("retry-target"));
     let attempts = Arc::new(AtomicUsize::new(0));
     let seen = attempts.clone();
-    let app = App::builder()
-        .service(
-            "jobs",
-            worker_from(move |context| {
-                WorkerBuilder::new(context)
-                    .backend(backend)
-                    .layer(Receipts)
-                    .retry(RetryPolicy::retries(1))
-                    .build(move |_: Job| {
-                        let index = seen.fetch_add(1, Ordering::SeqCst);
-                        async move {
-                            if index == 0 {
-                                Err::<(), BoxError>(io::Error::other("first-attempt").into())
-                            } else {
-                                Ok(())
-                            }
+    let mut app = App::new();
+    app.service(
+        "jobs",
+        worker(move |seat| {
+            WorkerBuilder::new(&seat)
+                .backend(backend)
+                .layer(Receipts)
+                .retry(RetryPolicy::retries(1))
+                .build(move |_: Job| {
+                    let index = seen.fetch_add(1, Ordering::SeqCst);
+                    async move {
+                        if index == 0 {
+                            Err::<(), BoxError>(io::Error::other("first-attempt").into())
+                        } else {
+                            Ok(())
                         }
-                    })
-                    .stream()
-            }),
-        )
-        .build()
-        .unwrap()
-        .start()
-        .unwrap();
+                    }
+                })
+                .stream()
+        }),
+    );
+    let app = app.start().unwrap();
     assert_eq!(
         tokio::time::timeout(Duration::from_secs(2), receipt)
             .await
@@ -127,31 +120,33 @@ async fn receipt_observes_final_retry_result_not_first_attempt() {
 async fn business_failure_has_a_final_failed_receipt() {
     let (queue, backend) = Queue::new(1);
     let receipt = accepted(queue.submit("failed"));
-    let app = App::builder()
-        .service(
-            "jobs",
-            worker_from(move |context| {
-                WorkerBuilder::new(context)
-                    .backend(backend)
-                    .layer(Receipts)
-                    .build(|job: Job| async move {
-                        assert_eq!(job.target, "failed");
-                        Err::<(), _>(io::Error::other("business-failure"))
-                    })
-                    .stream()
-            }),
-        )
-        .build()
-        .unwrap()
-        .start()
-        .unwrap();
+    let mut app = App::new();
+    app.service(
+        "jobs",
+        worker(move |seat| {
+            WorkerBuilder::new(&seat)
+                .backend(backend)
+                .layer(Receipts)
+                .build(|job: Job| async move {
+                    assert_eq!(job.target, "failed");
+                    Err::<(), _>(io::Error::other("business-failure"))
+                })
+                .stream()
+        }),
+    );
+    let app = app.start().unwrap();
     assert_eq!(
         receipt.await.unwrap(),
         Receipt::Failed("business-failure".into())
     );
     let report = app.shutdown().await.unwrap();
     assert!(report.is_success());
-    assert_eq!(report.snapshot.services[0].execution_errors, 1);
+    let stats = report
+        .service("jobs")
+        .unwrap()
+        .detail::<MijuStats>()
+        .unwrap();
+    assert_eq!(stats.job_errors(), 1);
 }
 
 #[tokio::test]

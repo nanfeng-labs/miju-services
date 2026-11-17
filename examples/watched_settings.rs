@@ -14,14 +14,13 @@ async fn main() -> Result<(), BoxError> {
         interval: Duration::from_millis(500),
         message: "initial settings".into(),
     }));
-    let app = App::builder()
-        .service_fn("printer", move |context| {
-            watched_settings::run(context, settings, |snapshot| async move {
-                println!("{}", snapshot.message);
-                Ok(())
-            })
+    let mut app = App::new();
+    app.service_fn("printer", move |ctx| {
+        watched_settings::run(ctx, settings, |snapshot| async move {
+            println!("{}", snapshot.message);
+            Ok(())
         })
-        .build()?;
+    });
 
     let report = app
         .run_until(async move {
@@ -36,6 +35,6 @@ async fn main() -> Result<(), BoxError> {
             Ok::<(), BoxError>(())
         })
         .await?;
-    println!("{report:?}");
+    println!("{report}");
     Ok(())
 }
