@@ -2,11 +2,13 @@
 
 ## [Unreleased]
 
-- ci: append full changelog links to releases ([#25](https://github.com/nanfeng-labs/miju-services/pull/25))
+## [0.3.0]
+
+- bump: to v0.3.0 ([#28](https://github.com/nanfeng-labs/miju-services/pull/28))
 
 - feat!: rebuild the core around scope ownership for v0.3.0 ([#27](https://github.com/nanfeng-labs/miju-services/pull/27))
 
-## [0.3.0]
+- ci: append full changelog links to releases ([#25](https://github.com/nanfeng-labs/miju-services/pull/25))
 
 0.3 rebuilds the core on one ownership model: every service has a scope that
 counts its root, its work and its leases, and a single lifecycle driver makes
