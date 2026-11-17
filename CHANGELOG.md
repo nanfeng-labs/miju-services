@@ -4,6 +4,8 @@
 
 ## [0.3.0]
 
+- bump: to v0.3.0 ([#28](https://github.com/nanfeng-labs/miju-services/pull/28))
+
 - feat!: rebuild the core around scope ownership for v0.3.0 ([#27](https://github.com/nanfeng-labs/miju-services/pull/27))
 
 - ci: append full changelog links to releases ([#25](https://github.com/nanfeng-labs/miju-services/pull/25))
