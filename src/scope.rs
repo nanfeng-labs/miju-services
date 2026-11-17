@@ -802,6 +802,14 @@ mod tests {
             .await
             .expect("a running task was missed by the abort pass");
         assert!(matches!(outcome, Err(WorkError::Aborted)));
-        assert!(scope.is_drained());
+        // Release is ordered result first, count second, possibly on another
+        // worker thread, so the drain can follow the result by a moment.
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while !scope.is_drained() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("the aborted task never released its count");
     }
 }

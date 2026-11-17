@@ -1109,6 +1109,9 @@ async fn a_finite_worker_dependent_waits_for_exhaustion_and_drain() {
 // the service to stop (closing admission), and only then hands the job over.
 struct StopDuringDequeue {
     yielded: bool,
+    /// Whether to stop the application at dequeue; if so, the job is not
+    /// taken before the test has stored the handle.
+    stop: bool,
     jobs: VecDeque<u32>,
     handle: Arc<Mutex<Option<AppHandle>>>,
     reached_stopping: Arc<AtomicBool>,
@@ -1133,10 +1136,16 @@ impl Backend for StopDuringDequeue {
             cx.waker().wake_by_ref();
             return Poll::Pending;
         }
+        let handle = self.handle.lock().unwrap().clone();
+        if self.stop && handle.is_none() {
+            // The root can poll before the test stores the handle: wait for it,
+            // or the job would be handed over without the stop under test.
+            cx.waker().wake_by_ref();
+            return Poll::Pending;
+        }
         let Some(job) = self.jobs.pop_front() else {
             return Poll::Pending;
         };
-        let handle = self.handle.lock().unwrap().clone();
         if let Some(handle) = handle {
             let observer = handle.observer();
             std::thread::spawn(move || handle.stop()).join().unwrap();
@@ -1182,6 +1191,7 @@ async fn a_dequeued_job_runs_when_stop_closes_admission_before_the_executor_call
     let reached_stopping = Arc::new(AtomicBool::new(false));
     let backend = StopDuringDequeue {
         yielded: false,
+        stop: true,
         jobs: VecDeque::from([1]),
         handle: handle_slot.clone(),
         reached_stopping: reached_stopping.clone(),
@@ -1207,7 +1217,15 @@ async fn a_dequeued_job_runs_when_stop_closes_admission_before_the_executor_call
     }
     let app = app.start().unwrap();
     *handle_slot.lock().unwrap() = Some(app.clone());
-    let report = bounded(app.wait()).await.unwrap();
+    let Ok(report) = timeout(Duration::from_secs(10), app.wait()).await else {
+        panic!(
+            "stalled: reached stopping {}, handled {}\n{:#?}",
+            reached_stopping.load(SeqCst),
+            handled.load(SeqCst),
+            app.snapshot()
+        );
+    };
+    let report = report.unwrap();
     assert!(
         reached_stopping.load(SeqCst),
         "the service never reached Stopping before the job was handed over"
@@ -1226,27 +1244,36 @@ async fn a_dequeued_job_runs_when_stop_closes_admission_before_the_executor_call
 async fn panicking_job(stop_window: bool) -> (Arc<miju_services::Report>, bool) {
     let handle_slot = Arc::new(Mutex::new(None));
     let reached_stopping = Arc::new(AtomicBool::new(false));
+    let runs = Arc::new(AtomicUsize::new(0));
     let backend = StopDuringDequeue {
         yielded: false,
+        stop: stop_window,
         jobs: VecDeque::from([1]),
         handle: handle_slot.clone(),
         reached_stopping: reached_stopping.clone(),
     };
     let mut app = App::new();
-    app.service(
-        "jobs",
-        worker(move |seat| {
-            WorkerBuilder::new(&seat)
-                .backend(backend)
-                .parallelize(seat.executor())
-                .build(move |job: u32| async move {
-                    if job == 1 {
-                        panic!("job panics");
-                    }
-                })
-                .stream()
-        }),
-    );
+    {
+        let runs = runs.clone();
+        app.service(
+            "jobs",
+            worker(move |seat| {
+                WorkerBuilder::new(&seat)
+                    .backend(backend)
+                    .parallelize(seat.executor())
+                    .build(move |job: u32| {
+                        let runs = runs.clone();
+                        async move {
+                            runs.fetch_add(1, SeqCst);
+                            if job == 1 {
+                                panic!("job panics");
+                            }
+                        }
+                    })
+                    .stream()
+            }),
+        );
+    }
     let app = app.start().unwrap();
     if stop_window {
         *handle_slot.lock().unwrap() = Some(app.clone());
@@ -1254,8 +1281,17 @@ async fn panicking_job(stop_window: bool) -> (Arc<miju_services::Report>, bool) 
         tokio::time::sleep(Duration::from_millis(200)).await;
         app.stop();
     }
-    let report = bounded(app.wait()).await.unwrap();
-    (report, reached_stopping.load(SeqCst))
+    // On a stall, say where: the phase, work counters (managed jobs count
+    // there) and what is still outstanding.
+    let Ok(report) = timeout(Duration::from_secs(10), app.wait()).await else {
+        panic!(
+            "stalled: stop window {stop_window}, reached stopping {}, handler runs {}\n{:#?}",
+            reached_stopping.load(SeqCst),
+            runs.load(SeqCst),
+            app.snapshot()
+        );
+    };
+    (report.unwrap(), reached_stopping.load(SeqCst))
 }
 
 // A panicking job is a lost job, not a failure of the worker, whether it ran
