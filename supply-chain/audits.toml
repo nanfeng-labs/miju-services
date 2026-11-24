@@ -1,6 +1,18 @@
 
 # cargo-vet audits file
 
+[[audits.clap]]
+who = "Codex (AI-assisted review)"
+criteria = "safe-to-run"
+delta = "4.6.8 -> 4.6.9"
+notes = "Reviewed the checksum-verified crates.io archive delta. Changes cover release metadata, documentation links and the matching optional clap_derive pin. Runtime code, features, the resolved clap_builder version and the Rust requirement are unchanged. This extends the existing 4.6.8 baseline for the configured_app development example."
+
+[[audits.clap_derive]]
+who = "Codex (AI-assisted review)"
+criteria = "safe-to-run"
+delta = "4.6.8 -> 4.6.9"
+notes = "Reviewed the checksum-verified crates.io archive delta. The derive implementation now explicitly discards the value returned by the existing group ID assertion for optional flattened arguments. It still evaluates the same assertion and preserves its failure behavior. Dependencies and the Rust requirement are unchanged. This extends the existing 4.6.8 baseline."
+
 [[audits.miju]]
 who = "Codex (AI-assisted source review)"
 criteria = "safe-to-deploy"
