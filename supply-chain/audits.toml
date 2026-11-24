@@ -24,3 +24,9 @@ who = "Codex (AI-assisted source review)"
 criteria = "safe-to-deploy"
 delta = "0.2.0 -> 0.2.1"
 notes = "Reviewed the published 0.2.0 to 0.2.1 source and manifest delta against the release commit. Runtime changes are confined to Monitor: retain an observed signal error outside the terminator future and yield with an explicit wake after successful restart. No public type, unsafe code, I/O boundary, or third-party dependency requirement changes. Reviewed regression tests for both changes and isolated restart ablations. The 0.2.0 exemption remains the baseline; dependencies require separate coverage."
+
+[[audits.pin-project-lite]]
+who = "Codex (AI-assisted review)"
+criteria = "safe-to-deploy"
+delta = "0.2.17 -> 0.2.18"
+notes = "Reviewed the checksum-verified crates.io archive delta. The generated Drop coherence guard now applies to unsized types using the hidden core::marker::Sized export, with a compile-fail regression case. Projection and PinnedDrop behavior for the sized futures used by miju-services is unchanged. Dependencies, features and the Rust requirement are unchanged. This extends the existing 0.2.17 baseline."
